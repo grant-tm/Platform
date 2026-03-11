@@ -9,10 +9,45 @@ typedef struct PlatformFileRead
     b32 success;
 } PlatformFileRead;
 
+typedef struct PlatformDirectory
+{
+    c8 path[260];
+    usize path_count;
+} PlatformDirectory;
+
+typedef enum PlatformDirectoryEntryType
+{
+    PLATFORM_DIRECTORY_ENTRY_TYPE_NONE = 0,
+    PLATFORM_DIRECTORY_ENTRY_TYPE_FILE,
+    PLATFORM_DIRECTORY_ENTRY_TYPE_DIRECTORY,
+} PlatformDirectoryEntryType;
+
+typedef struct PlatformDirectoryEntry
+{
+    String name;
+    String path;
+    PlatformDirectoryEntryType type;
+} PlatformDirectoryEntry;
+
+typedef struct PlatformDirectoryIterator
+{
+    byte state[1024];
+} PlatformDirectoryIterator;
+
+String Platform_JoinPath (MemoryArena *arena, String left, String right);
 String Platform_GetWorkingDirectory (MemoryArena *arena);
 String Platform_GetExecutablePath (MemoryArena *arena);
 String Platform_GetExecutableDirectory (MemoryArena *arena);
 String Platform_GetTempDirectory (MemoryArena *arena);
+
+b32 Platform_DirectoryExists (String path);
+b32 PlatformDirectory_Open (PlatformDirectory *directory, String path);
+String PlatformDirectory_GetPath (const PlatformDirectory *directory);
+b32 PlatformDirectory_Enter (PlatformDirectory *directory, String child_name);
+b32 PlatformDirectory_Up (PlatformDirectory *directory);
+b32 PlatformDirectory_BeginIteration (const PlatformDirectory *directory, PlatformDirectoryIterator *iterator, MemoryArena *arena, PlatformDirectoryEntry *entry);
+b32 PlatformDirectory_Next (PlatformDirectoryIterator *iterator, MemoryArena *arena, PlatformDirectoryEntry *entry);
+void PlatformDirectory_EndIteration (PlatformDirectoryIterator *iterator);
 
 b32 Platform_FileExists (String path);
 b32 Platform_GetFileSize (String path, u64 *size);
