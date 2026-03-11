@@ -10,7 +10,11 @@ typedef enum PlatformEventType
     PLATFORM_EVENT_NONE = 0,
     PLATFORM_EVENT_QUIT,
     PLATFORM_EVENT_WINDOW_CLOSE_REQUESTED,
+    PLATFORM_EVENT_WINDOW_MOVED,
     PLATFORM_EVENT_WINDOW_RESIZED,
+    PLATFORM_EVENT_WINDOW_MINIMIZED,
+    PLATFORM_EVENT_WINDOW_MAXIMIZED,
+    PLATFORM_EVENT_WINDOW_RESTORED,
     PLATFORM_EVENT_WINDOW_FOCUS_GAINED,
     PLATFORM_EVENT_WINDOW_FOCUS_LOST,
     PLATFORM_EVENT_KEY_DOWN,
@@ -97,6 +101,12 @@ typedef struct PlatformEventWindowResized
     i32 height;
 } PlatformEventWindowResized;
 
+typedef struct PlatformEventWindowMoved
+{
+    i32 x;
+    i32 y;
+} PlatformEventWindowMoved;
+
 typedef struct PlatformEventKey
 {
     PlatformKey key;
@@ -136,6 +146,7 @@ typedef struct PlatformEvent
 
     union
     {
+        PlatformEventWindowMoved window_moved;
         PlatformEventWindowResized window_resized;
         PlatformEventKey key;
         PlatformEventTextInput text_input;

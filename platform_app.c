@@ -325,12 +325,34 @@ LRESULT CALLBACK Platform_WindowProc (HWND hwnd, UINT message, WPARAM w_param, L
         case WM_SIZE:
         {
             PlatformEvent event = {0};
+            WORD size_type;
 
-            event.type = PLATFORM_EVENT_WINDOW_RESIZED;
+            size_type = LOWORD(w_param);
+            switch (size_type)
+            {
+                case SIZE_MINIMIZED: event.type = PLATFORM_EVENT_WINDOW_MINIMIZED; break;
+                case SIZE_MAXIMIZED: event.type = PLATFORM_EVENT_WINDOW_MAXIMIZED; break;
+                case SIZE_RESTORED: event.type = PLATFORM_EVENT_WINDOW_RESTORED; break;
+                default: event.type = PLATFORM_EVENT_WINDOW_RESIZED; break;
+            }
+
             event.window = window;
             event.timestamp = Platform_QueryTimestamp();
             event.data.window_resized.width = (i32) LOWORD(l_param);
             event.data.window_resized.height = (i32) HIWORD(l_param);
+            Platform_PushEvent(&event);
+            return 0;
+        }
+
+        case WM_MOVE:
+        {
+            PlatformEvent event = {0};
+
+            event.type = PLATFORM_EVENT_WINDOW_MOVED;
+            event.window = window;
+            event.timestamp = Platform_QueryTimestamp();
+            event.data.window_moved.x = (i32) (short) LOWORD(l_param);
+            event.data.window_moved.y = (i32) (short) HIWORD(l_param);
             Platform_PushEvent(&event);
             return 0;
         }

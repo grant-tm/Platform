@@ -13,6 +13,32 @@ static DWORD Platform_GetWindowStyle (PlatformWindowFlags flags)
     return style;
 }
 
+static void Platform_AdjustWindowRectForClientSize (HWND hwnd, i32 client_width, i32 client_height, i32 *window_width, i32 *window_height)
+{
+    RECT client_rect;
+    DWORD style;
+    DWORD extended_style;
+
+    ASSERT(hwnd != NULL);
+    ASSERT(window_width != NULL);
+    ASSERT(window_height != NULL);
+    ASSERT(client_width > 0);
+    ASSERT(client_height > 0);
+
+    style = (DWORD) GetWindowLongPtrW(hwnd, GWL_STYLE);
+    extended_style = (DWORD) GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+
+    client_rect.left = 0;
+    client_rect.top = 0;
+    client_rect.right = client_width;
+    client_rect.bottom = client_height;
+
+    AdjustWindowRectEx(&client_rect, style, FALSE, extended_style);
+
+    *window_width = client_rect.right - client_rect.left;
+    *window_height = client_rect.bottom - client_rect.top;
+}
+
 PlatformWindow PlatformWindow_Create (const PlatformWindowDesc *desc)
 {
     PlatformWindowState *window_state;
@@ -61,7 +87,7 @@ PlatformWindow PlatformWindow_Create (const PlatformWindowDesc *desc)
         return HANDLE64_INVALID;
     }
 
-    SetWindowTextA(hwnd, desc->title);
+    PlatformWindow_SetTitle(Platform_CreateWindowHandle(window_state->handle.index, window_state->handle.generation), desc->title);
 
     if (Bits_HasAnyU32(desc->flags, PLATFORM_WINDOW_FLAG_VISIBLE))
     {
@@ -89,6 +115,18 @@ b32 PlatformWindow_IsValid (PlatformWindow window)
     return Platform_GetWindowState(window) != NULL;
 }
 
+void PlatformWindow_SetTitle (PlatformWindow window, const c8 *title)
+{
+    PlatformWindowState *window_state;
+
+    ASSERT(title != NULL);
+
+    window_state = Platform_GetWindowState(window);
+    ASSERT(window_state != NULL);
+
+    SetWindowTextA(window_state->hwnd, title);
+}
+
 void PlatformWindow_Show (PlatformWindow window)
 {
     PlatformWindowState *window_state;
@@ -97,6 +135,112 @@ void PlatformWindow_Show (PlatformWindow window)
     ASSERT(window_state != NULL);
 
     ShowWindow(window_state->hwnd, SW_SHOW);
+}
+
+void PlatformWindow_Hide (PlatformWindow window)
+{
+    PlatformWindowState *window_state;
+
+    window_state = Platform_GetWindowState(window);
+    ASSERT(window_state != NULL);
+
+    ShowWindow(window_state->hwnd, SW_HIDE);
+}
+
+void PlatformWindow_Focus (PlatformWindow window)
+{
+    PlatformWindowState *window_state;
+
+    window_state = Platform_GetWindowState(window);
+    ASSERT(window_state != NULL);
+
+    SetForegroundWindow(window_state->hwnd);
+    SetFocus(window_state->hwnd);
+}
+
+void PlatformWindow_Minimize (PlatformWindow window)
+{
+    PlatformWindowState *window_state;
+
+    window_state = Platform_GetWindowState(window);
+    ASSERT(window_state != NULL);
+
+    ShowWindow(window_state->hwnd, SW_MINIMIZE);
+}
+
+void PlatformWindow_Maximize (PlatformWindow window)
+{
+    PlatformWindowState *window_state;
+
+    window_state = Platform_GetWindowState(window);
+    ASSERT(window_state != NULL);
+
+    ShowWindow(window_state->hwnd, SW_MAXIMIZE);
+}
+
+void PlatformWindow_Restore (PlatformWindow window)
+{
+    PlatformWindowState *window_state;
+
+    window_state = Platform_GetWindowState(window);
+    ASSERT(window_state != NULL);
+
+    ShowWindow(window_state->hwnd, SW_RESTORE);
+}
+
+IVec2 PlatformWindow_GetPosition (PlatformWindow window)
+{
+    PlatformWindowState *window_state;
+    RECT rect;
+
+    window_state = Platform_GetWindowState(window);
+    ASSERT(window_state != NULL);
+
+    GetWindowRect(window_state->hwnd, &rect);
+    return IVec2_Create(rect.left, rect.top);
+}
+
+void PlatformWindow_SetPosition (PlatformWindow window, i32 x, i32 y)
+{
+    PlatformWindowState *window_state;
+    RECT rect;
+
+    window_state = Platform_GetWindowState(window);
+    ASSERT(window_state != NULL);
+
+    GetWindowRect(window_state->hwnd, &rect);
+    SetWindowPos(window_state->hwnd, NULL, x, y, rect.right - rect.left, rect.bottom - rect.top, SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+IVec2 PlatformWindow_GetWindowSize (PlatformWindow window)
+{
+    PlatformWindowState *window_state;
+    RECT rect;
+
+    window_state = Platform_GetWindowState(window);
+    ASSERT(window_state != NULL);
+
+    GetWindowRect(window_state->hwnd, &rect);
+    return IVec2_Create(rect.right - rect.left, rect.bottom - rect.top);
+}
+
+void PlatformWindow_SetClientSize (PlatformWindow window, i32 width, i32 height)
+{
+    PlatformWindowState *window_state;
+    RECT rect;
+    i32 window_width;
+    i32 window_height;
+
+    ASSERT(width > 0);
+    ASSERT(height > 0);
+
+    window_state = Platform_GetWindowState(window);
+    ASSERT(window_state != NULL);
+
+    Platform_AdjustWindowRectForClientSize(window_state->hwnd, width, height, &window_width, &window_height);
+    GetWindowRect(window_state->hwnd, &rect);
+
+    SetWindowPos(window_state->hwnd, NULL, rect.left, rect.top, window_width, window_height, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 IVec2 PlatformWindow_GetClientSize (PlatformWindow window)
@@ -109,4 +253,14 @@ IVec2 PlatformWindow_GetClientSize (PlatformWindow window)
 
     GetClientRect(window_state->hwnd, &rect);
     return IVec2_Create(rect.right - rect.left, rect.bottom - rect.top);
+}
+
+b32 PlatformWindow_IsFocused (PlatformWindow window)
+{
+    PlatformWindowState *window_state;
+
+    window_state = Platform_GetWindowState(window);
+    ASSERT(window_state != NULL);
+
+    return GetFocus() == window_state->hwnd;
 }
