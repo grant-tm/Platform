@@ -31,7 +31,7 @@ static b32 Platform_PathToCString (String path, c8 *buffer, usize buffer_size)
     return true;
 }
 
-static b32 Platform_PathExists (String path)
+b32 Platform_PathExists (String path)
 {
     WIN32_FILE_ATTRIBUTE_DATA file_data;
     c8 path_buffer[MAX_PATH];
@@ -208,6 +208,23 @@ static String Platform_GetParentDirectoryView (String path)
     return String_Create(NULL, 0);
 }
 
+static Nanoseconds Platform_FileTimeToNanoseconds (FILETIME file_time)
+{
+    static const u64 WINDOWS_TO_UNIX_EPOCH_100NS = 116444736000000000ull;
+    ULARGE_INTEGER value;
+    u64 hundred_nanosecond_intervals;
+
+    value.LowPart = file_time.dwLowDateTime;
+    value.HighPart = file_time.dwHighDateTime;
+    hundred_nanosecond_intervals = value.QuadPart;
+    if (hundred_nanosecond_intervals < WINDOWS_TO_UNIX_EPOCH_100NS)
+    {
+        return 0;
+    }
+
+    return (Nanoseconds) ((hundred_nanosecond_intervals - WINDOWS_TO_UNIX_EPOCH_100NS) * 100ull);
+}
+
 String Platform_JoinPath (MemoryArena *arena, String left, String right)
 {
     c8 *buffer;
@@ -245,6 +262,85 @@ String Platform_JoinPath (MemoryArena *arena, String left, String right)
     }
 
     return String_Create(buffer, total_count);
+}
+
+String Platform_GetParentPath (String path)
+{
+    return Platform_GetParentDirectoryView(path);
+}
+
+String Platform_GetFileName (String path)
+{
+    usize index;
+
+    if (String_IsEmpty(path))
+    {
+        return String_Create(NULL, 0);
+    }
+
+    for (index = path.count; index > 0; index -= 1)
+    {
+        if (Platform_IsPathSeparator(path.data[index - 1]))
+        {
+            return String_Suffix(path, path.count - index);
+        }
+    }
+
+    return path;
+}
+
+String Platform_GetExtension (String path)
+{
+    String file_name;
+    usize index;
+
+    file_name = Platform_GetFileName(path);
+    if (String_IsEmpty(file_name))
+    {
+        return String_Create(NULL, 0);
+    }
+
+    for (index = file_name.count; index > 0; index -= 1)
+    {
+        if (file_name.data[index - 1] == '.')
+        {
+            if (index == 1)
+            {
+                return String_Create(NULL, 0);
+            }
+
+            return String_Suffix(file_name, file_name.count - index);
+        }
+    }
+
+    return String_Create(NULL, 0);
+}
+
+String Platform_GetStem (String path)
+{
+    String file_name;
+    usize index;
+
+    file_name = Platform_GetFileName(path);
+    if (String_IsEmpty(file_name))
+    {
+        return String_Create(NULL, 0);
+    }
+
+    for (index = file_name.count; index > 0; index -= 1)
+    {
+        if (file_name.data[index - 1] == '.')
+        {
+            if (index == 1)
+            {
+                return file_name;
+            }
+
+            return String_Prefix(file_name, index - 1);
+        }
+    }
+
+    return file_name;
 }
 
 String Platform_GetWorkingDirectory (MemoryArena *arena)
@@ -325,6 +421,97 @@ String Platform_GetTempDirectory (MemoryArena *arena)
     }
 
     return Platform_CopyCStringToArena(arena, path_buffer, (usize) path_length);
+}
+
+b32 Platform_GetPathInfo (String path, PlatformPathInfo *info)
+{
+    WIN32_FILE_ATTRIBUTE_DATA file_data;
+    ULARGE_INTEGER file_size;
+    c8 path_buffer[MAX_PATH];
+
+    ASSERT(info != NULL);
+
+    if (!Platform_PathToCString(path, path_buffer, ARRAY_COUNT(path_buffer)))
+    {
+        return false;
+    }
+
+    if (!GetFileAttributesExA(path_buffer, GetFileExInfoStandard, &file_data))
+    {
+        return false;
+    }
+
+    file_size.LowPart = file_data.nFileSizeLow;
+    file_size.HighPart = file_data.nFileSizeHigh;
+
+    info->type = ((file_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+        ? PLATFORM_DIRECTORY_ENTRY_TYPE_DIRECTORY
+        : PLATFORM_DIRECTORY_ENTRY_TYPE_FILE;
+    info->size = file_size.QuadPart;
+    info->creation_time = Platform_FileTimeToNanoseconds(file_data.ftCreationTime);
+    info->last_write_time = Platform_FileTimeToNanoseconds(file_data.ftLastWriteTime);
+    return true;
+}
+
+b32 Platform_CreateDirectory (String path)
+{
+    c8 path_buffer[MAX_PATH];
+
+    if (!Platform_PathToCString(path, path_buffer, ARRAY_COUNT(path_buffer)))
+    {
+        return false;
+    }
+
+    if (CreateDirectoryA(path_buffer, NULL))
+    {
+        return true;
+    }
+
+    return GetLastError() == ERROR_ALREADY_EXISTS;
+}
+
+b32 Platform_CreateDirectoryRecursive (String path)
+{
+    c8 path_buffer[MAX_PATH];
+    usize index;
+
+    if (!Platform_PathToCString(path, path_buffer, ARRAY_COUNT(path_buffer)))
+    {
+        return false;
+    }
+
+    for (index = 0; path_buffer[index] != 0; index += 1)
+    {
+        if (Platform_IsPathSeparator(path_buffer[index]))
+        {
+            c8 saved_character;
+
+            if ((index == 0) || ((index == 2) && (path_buffer[1] == ':')))
+            {
+                continue;
+            }
+
+            saved_character = path_buffer[index];
+            path_buffer[index] = 0;
+
+            if ((path_buffer[0] != 0) &&
+                !CreateDirectoryA(path_buffer, NULL) &&
+                (GetLastError() != ERROR_ALREADY_EXISTS))
+            {
+                path_buffer[index] = saved_character;
+                return false;
+            }
+
+            path_buffer[index] = saved_character;
+        }
+    }
+
+    if (!CreateDirectoryA(path_buffer, NULL) && (GetLastError() != ERROR_ALREADY_EXISTS))
+    {
+        return false;
+    }
+
+    return true;
 }
 
 b32 PlatformDirectory_Open (PlatformDirectory *directory, String path)
@@ -529,6 +716,66 @@ b32 Platform_GetFileSize (String path, u64 *size)
     file_size.HighPart = file_data.nFileSizeHigh;
     *size = file_size.QuadPart;
     return true;
+}
+
+b32 Platform_CopyFile (String source_path, String destination_path, b32 overwrite)
+{
+    c8 source_buffer[MAX_PATH];
+    c8 destination_buffer[MAX_PATH];
+
+    if (!Platform_PathToCString(source_path, source_buffer, ARRAY_COUNT(source_buffer)))
+    {
+        return false;
+    }
+
+    if (!Platform_PathToCString(destination_path, destination_buffer, ARRAY_COUNT(destination_buffer)))
+    {
+        return false;
+    }
+
+    return CopyFileA(source_buffer, destination_buffer, overwrite ? FALSE : TRUE) != 0;
+}
+
+b32 Platform_MovePath (String source_path, String destination_path)
+{
+    c8 source_buffer[MAX_PATH];
+    c8 destination_buffer[MAX_PATH];
+
+    if (!Platform_PathToCString(source_path, source_buffer, ARRAY_COUNT(source_buffer)))
+    {
+        return false;
+    }
+
+    if (!Platform_PathToCString(destination_path, destination_buffer, ARRAY_COUNT(destination_buffer)))
+    {
+        return false;
+    }
+
+    return MoveFileExA(source_buffer, destination_buffer, MOVEFILE_REPLACE_EXISTING) != 0;
+}
+
+b32 Platform_DeleteFile (String path)
+{
+    c8 path_buffer[MAX_PATH];
+
+    if (!Platform_PathToCString(path, path_buffer, ARRAY_COUNT(path_buffer)))
+    {
+        return false;
+    }
+
+    return DeleteFileA(path_buffer) != 0;
+}
+
+b32 Platform_DeleteDirectory (String path)
+{
+    c8 path_buffer[MAX_PATH];
+
+    if (!Platform_PathToCString(path, path_buffer, ARRAY_COUNT(path_buffer)))
+    {
+        return false;
+    }
+
+    return RemoveDirectoryA(path_buffer) != 0;
 }
 
 PlatformFileRead Platform_ReadEntireFile (MemoryArena *arena, String path)

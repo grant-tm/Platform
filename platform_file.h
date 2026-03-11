@@ -22,6 +22,14 @@ typedef enum PlatformDirectoryEntryType
     PLATFORM_DIRECTORY_ENTRY_TYPE_DIRECTORY,
 } PlatformDirectoryEntryType;
 
+typedef struct PlatformPathInfo
+{
+    PlatformDirectoryEntryType type;
+    u64 size;
+    Nanoseconds creation_time;
+    Nanoseconds last_write_time;
+} PlatformPathInfo;
+
 typedef struct PlatformDirectoryEntry
 {
     String name;
@@ -35,12 +43,20 @@ typedef struct PlatformDirectoryIterator
 } PlatformDirectoryIterator;
 
 String Platform_JoinPath (MemoryArena *arena, String left, String right);
+String Platform_GetParentPath (String path);
+String Platform_GetFileName (String path);
+String Platform_GetExtension (String path);
+String Platform_GetStem (String path);
 String Platform_GetWorkingDirectory (MemoryArena *arena);
 String Platform_GetExecutablePath (MemoryArena *arena);
 String Platform_GetExecutableDirectory (MemoryArena *arena);
 String Platform_GetTempDirectory (MemoryArena *arena);
 
+b32 Platform_PathExists (String path);
+b32 Platform_GetPathInfo (String path, PlatformPathInfo *info);
 b32 Platform_DirectoryExists (String path);
+b32 Platform_CreateDirectory (String path);
+b32 Platform_CreateDirectoryRecursive (String path);
 b32 PlatformDirectory_Open (PlatformDirectory *directory, String path);
 String PlatformDirectory_GetPath (const PlatformDirectory *directory);
 b32 PlatformDirectory_Enter (PlatformDirectory *directory, String child_name);
@@ -51,6 +67,10 @@ void PlatformDirectory_EndIteration (PlatformDirectoryIterator *iterator);
 
 b32 Platform_FileExists (String path);
 b32 Platform_GetFileSize (String path, u64 *size);
+b32 Platform_CopyFile (String source_path, String destination_path, b32 overwrite);
+b32 Platform_MovePath (String source_path, String destination_path);
+b32 Platform_DeleteFile (String path);
+b32 Platform_DeleteDirectory (String path);
 PlatformFileRead Platform_ReadEntireFile (MemoryArena *arena, String path);
 b32 Platform_WriteEntireFile (String path, ByteSlice bytes);
 
