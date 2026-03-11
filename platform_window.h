@@ -12,7 +12,7 @@ typedef enum PlatformWindowFlags
 
 typedef struct PlatformWindowDesc
 {
-    const c8 *title;
+    String title;
     i32 width;
     i32 height;
     PlatformWindowFlags flags;
@@ -21,7 +21,7 @@ typedef struct PlatformWindowDesc
 PlatformWindow PlatformWindow_Create (const PlatformWindowDesc *desc);
 void PlatformWindow_Destroy (PlatformWindow window);
 b32 PlatformWindow_IsValid (PlatformWindow window);
-void PlatformWindow_SetTitle (PlatformWindow window, const c8 *title);
+void PlatformWindow_SetTitle (PlatformWindow window, String title);
 void PlatformWindow_Show (PlatformWindow window);
 void PlatformWindow_Hide (PlatformWindow window);
 void PlatformWindow_Focus (PlatformWindow window);

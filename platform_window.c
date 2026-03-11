@@ -39,6 +39,27 @@ static void Platform_AdjustWindowRectForClientSize (HWND hwnd, i32 client_width,
     *window_height = client_rect.bottom - client_rect.top;
 }
 
+static void PlatformWindow_SetTitleCString (HWND hwnd, String title)
+{
+    MemoryArena arena;
+    c8 stack_buffer[512];
+    c8 *title_buffer;
+
+    ASSERT(hwnd != NULL);
+
+    arena = MemoryArena_Create(stack_buffer, sizeof(stack_buffer));
+    title_buffer = MemoryArena_PushArray(&arena, c8, title.count + 1);
+    ASSERT(title_buffer != NULL);
+
+    if (title.count > 0)
+    {
+        Memory_Copy(title_buffer, title.data, title.count);
+    }
+
+    title_buffer[title.count] = 0;
+    SetWindowTextA(hwnd, title_buffer);
+}
+
 PlatformWindow PlatformWindow_Create (const PlatformWindowDesc *desc)
 {
     PlatformWindowState *window_state;
@@ -47,7 +68,8 @@ PlatformWindow PlatformWindow_Create (const PlatformWindowDesc *desc)
     HWND hwnd;
 
     ASSERT(desc != NULL);
-    ASSERT(desc->title != NULL);
+    ASSERT(desc->title.data != NULL);
+    ASSERT(desc->title.count > 0);
     ASSERT(desc->width > 0);
     ASSERT(desc->height > 0);
     ASSERT(platform_state.is_initialized);
@@ -115,16 +137,16 @@ b32 PlatformWindow_IsValid (PlatformWindow window)
     return Platform_GetWindowState(window) != NULL;
 }
 
-void PlatformWindow_SetTitle (PlatformWindow window, const c8 *title)
+void PlatformWindow_SetTitle (PlatformWindow window, String title)
 {
     PlatformWindowState *window_state;
-
-    ASSERT(title != NULL);
+    ASSERT(title.data != NULL);
+    ASSERT(title.count > 0);
 
     window_state = Platform_GetWindowState(window);
     ASSERT(window_state != NULL);
 
-    SetWindowTextA(window_state->hwnd, title);
+    PlatformWindow_SetTitleCString(window_state->hwnd, title);
 }
 
 void PlatformWindow_Show (PlatformWindow window)
