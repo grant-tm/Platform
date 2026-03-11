@@ -8,6 +8,7 @@
 #include "platform.h"
 
 #define PLATFORM_MAX_WINDOWS 64
+#define PLATFORM_MAX_PENDING_EVENTS 1024
 #define PLATFORM_WINDOW_CLASS_NAME L"MorganAudioPlatformWindowClass"
 
 typedef struct PlatformWindowState
@@ -24,7 +25,8 @@ typedef struct PlatformState
     LARGE_INTEGER performance_frequency;
     ATOM window_class;
     PlatformWindowState windows[PLATFORM_MAX_WINDOWS];
-    PlatformEventBuffer *active_event_buffer;
+    PlatformEvent pending_events[PLATFORM_MAX_PENDING_EVENTS];
+    usize pending_event_count;
 } PlatformState;
 
 extern PlatformState platform_state;

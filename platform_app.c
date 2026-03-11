@@ -87,32 +87,27 @@ b32 Platform_IsInitialized (void)
 
 void Platform_PushEvent (const PlatformEvent *event)
 {
-    PlatformEventBuffer *buffer;
+    ASSERT(event != NULL);
 
-    buffer = platform_state.active_event_buffer;
-    if ((buffer == NULL) || (buffer->events == NULL))
+    if (platform_state.pending_event_count >= ARRAY_COUNT(platform_state.pending_events))
     {
         return;
     }
 
-    if (buffer->count >= buffer->capacity)
-    {
-        return;
-    }
-
-    buffer->events[buffer->count] = *event;
-    buffer->count += 1;
+    platform_state.pending_events[platform_state.pending_event_count] = *event;
+    platform_state.pending_event_count += 1;
 }
 
 void Platform_PumpEvents (PlatformEventBuffer *event_buffer)
 {
     MSG message;
+    usize event_count_to_copy;
+    usize remaining_event_count;
 
     ASSERT(platform_state.is_initialized);
     ASSERT(event_buffer != NULL);
 
     PlatformEventBuffer_Reset(event_buffer);
-    platform_state.active_event_buffer = event_buffer;
 
     while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE))
     {
@@ -130,7 +125,25 @@ void Platform_PumpEvents (PlatformEventBuffer *event_buffer)
         DispatchMessageW(&message);
     }
 
-    platform_state.active_event_buffer = NULL;
+    event_count_to_copy = MIN(platform_state.pending_event_count, event_buffer->capacity);
+    if (event_count_to_copy > 0)
+    {
+        Memory_Copy(event_buffer->events, platform_state.pending_events, sizeof(platform_state.pending_events[0]) * event_count_to_copy);
+    }
+
+    event_buffer->count = event_count_to_copy;
+
+    remaining_event_count = platform_state.pending_event_count - event_count_to_copy;
+    if (remaining_event_count > 0)
+    {
+        Memory_Move(
+            platform_state.pending_events,
+            platform_state.pending_events + event_count_to_copy,
+            sizeof(platform_state.pending_events[0]) * remaining_event_count
+        );
+    }
+
+    platform_state.pending_event_count = remaining_event_count;
 }
 
 PlatformWindow Platform_CreateWindowHandle (u32 index, u32 generation)
@@ -325,17 +338,9 @@ LRESULT CALLBACK Platform_WindowProc (HWND hwnd, UINT message, WPARAM w_param, L
         case WM_SIZE:
         {
             PlatformEvent event = {0};
-            WORD size_type;
 
-            size_type = LOWORD(w_param);
-            switch (size_type)
-            {
-                case SIZE_MINIMIZED: event.type = PLATFORM_EVENT_WINDOW_MINIMIZED; break;
-                case SIZE_MAXIMIZED: event.type = PLATFORM_EVENT_WINDOW_MAXIMIZED; break;
-                case SIZE_RESTORED: event.type = PLATFORM_EVENT_WINDOW_RESTORED; break;
-                default: event.type = PLATFORM_EVENT_WINDOW_RESIZED; break;
-            }
-
+            (void) w_param;
+            event.type = PLATFORM_EVENT_WINDOW_RESIZED;
             event.window = window;
             event.timestamp = Platform_QueryTimestamp();
             event.data.window_resized.width = (i32) LOWORD(l_param);
