@@ -108,6 +108,7 @@ void Platform_PumpEvents (PlatformEventBuffer *event_buffer)
     ASSERT(event_buffer != NULL);
 
     PlatformEventBuffer_Reset(event_buffer);
+    Platform_ResetTransientInputState();
 
     while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE))
     {
@@ -124,6 +125,8 @@ void Platform_PumpEvents (PlatformEventBuffer *event_buffer)
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }
+
+    Platform_UpdateModifierState();
 
     event_count_to_copy = MIN(platform_state.pending_event_count, event_buffer->capacity);
     if (event_count_to_copy > 0)
@@ -325,12 +328,16 @@ LRESULT CALLBACK Platform_WindowProc (HWND hwnd, UINT message, WPARAM w_param, L
 
         case WM_SETFOCUS:
         {
+            Platform_UpdateModifierState();
             Platform_PushWindowEvent(window, PLATFORM_EVENT_WINDOW_FOCUS_GAINED);
             return 0;
         }
 
         case WM_KILLFOCUS:
         {
+            Memory_Zero(platform_state.input_state.keys, sizeof(platform_state.input_state.keys));
+            Memory_Zero(platform_state.input_state.mouse_buttons, sizeof(platform_state.input_state.mouse_buttons));
+            Platform_UpdateModifierState();
             Platform_PushWindowEvent(window, PLATFORM_EVENT_WINDOW_FOCUS_LOST);
             return 0;
         }
@@ -368,12 +375,23 @@ LRESULT CALLBACK Platform_WindowProc (HWND hwnd, UINT message, WPARAM w_param, L
         case WM_SYSKEYUP:
         {
             PlatformEvent event = {0};
+            PlatformKey key;
+            b32 is_key_down;
 
             event.type = ((message == WM_KEYDOWN) || (message == WM_SYSKEYDOWN)) ? PLATFORM_EVENT_KEY_DOWN : PLATFORM_EVENT_KEY_UP;
             event.window = window;
             event.timestamp = Platform_QueryTimestamp();
-            event.data.key.key = Platform_KeyFromVirtualKey(w_param);
+            key = Platform_KeyFromVirtualKey(w_param);
+            event.data.key.key = key;
             event.data.key.is_repeat = (l_param & (1 << 30)) != 0;
+            is_key_down = event.type == PLATFORM_EVENT_KEY_DOWN;
+
+            if ((key > PLATFORM_KEY_NONE) && (key < PLATFORM_KEY_COUNT))
+            {
+                platform_state.input_state.keys[key] = is_key_down;
+            }
+
+            Platform_UpdateModifierState();
             Platform_PushEvent(&event);
             return 0;
         }
@@ -393,12 +411,18 @@ LRESULT CALLBACK Platform_WindowProc (HWND hwnd, UINT message, WPARAM w_param, L
         case WM_MOUSEMOVE:
         {
             PlatformEvent event = {0};
+            IVec2 previous_position;
+            IVec2 new_position;
 
             event.type = PLATFORM_EVENT_MOUSE_MOVE;
             event.window = window;
             event.timestamp = Platform_QueryTimestamp();
             event.data.mouse_move.x = GET_X_LPARAM(l_param);
             event.data.mouse_move.y = GET_Y_LPARAM(l_param);
+            previous_position = platform_state.input_state.mouse_position;
+            new_position = IVec2_Create(event.data.mouse_move.x, event.data.mouse_move.y);
+            platform_state.input_state.mouse_position = new_position;
+            platform_state.input_state.mouse_delta = IVec2_Add(platform_state.input_state.mouse_delta, IVec2_Subtract(new_position, previous_position));
             Platform_PushEvent(&event);
             return 0;
         }
@@ -413,15 +437,26 @@ LRESULT CALLBACK Platform_WindowProc (HWND hwnd, UINT message, WPARAM w_param, L
         case WM_XBUTTONUP:
         {
             PlatformEvent event = {0};
+            PlatformMouseButton button;
+            b32 is_button_down;
 
             event.type = ((message == WM_LBUTTONDOWN) || (message == WM_RBUTTONDOWN) || (message == WM_MBUTTONDOWN) || (message == WM_XBUTTONDOWN))
                 ? PLATFORM_EVENT_MOUSE_BUTTON_DOWN
                 : PLATFORM_EVENT_MOUSE_BUTTON_UP;
             event.window = window;
             event.timestamp = Platform_QueryTimestamp();
-            event.data.mouse_button.button = Platform_MouseButtonFromMessage(message, w_param);
+            button = Platform_MouseButtonFromMessage(message, w_param);
+            event.data.mouse_button.button = button;
             event.data.mouse_button.x = GET_X_LPARAM(l_param);
             event.data.mouse_button.y = GET_Y_LPARAM(l_param);
+            is_button_down = event.type == PLATFORM_EVENT_MOUSE_BUTTON_DOWN;
+
+            if ((button > PLATFORM_MOUSE_BUTTON_NONE) && (button < PLATFORM_MOUSE_BUTTON_COUNT))
+            {
+                platform_state.input_state.mouse_buttons[button] = is_button_down;
+            }
+
+            platform_state.input_state.mouse_position = IVec2_Create(event.data.mouse_button.x, event.data.mouse_button.y);
             Platform_PushEvent(&event);
             return 0;
         }
@@ -436,6 +471,8 @@ LRESULT CALLBACK Platform_WindowProc (HWND hwnd, UINT message, WPARAM w_param, L
             event.data.mouse_wheel.delta = (i32) GET_WHEEL_DELTA_WPARAM(w_param);
             event.data.mouse_wheel.x = GET_X_LPARAM(l_param);
             event.data.mouse_wheel.y = GET_Y_LPARAM(l_param);
+            platform_state.input_state.mouse_position = IVec2_Create(event.data.mouse_wheel.x, event.data.mouse_wheel.y);
+            platform_state.input_state.mouse_wheel_delta += event.data.mouse_wheel.delta;
             Platform_PushEvent(&event);
             return 0;
         }

@@ -24,6 +24,7 @@ typedef struct PlatformState
     HINSTANCE instance;
     LARGE_INTEGER performance_frequency;
     ATOM window_class;
+    PlatformInputState input_state;
     PlatformWindowState windows[PLATFORM_MAX_WINDOWS];
     PlatformEvent pending_events[PLATFORM_MAX_PENDING_EVENTS];
     usize pending_event_count;
@@ -39,6 +40,8 @@ PlatformKey Platform_KeyFromVirtualKey (WPARAM virtual_key);
 PlatformMouseButton Platform_MouseButtonFromMessage (UINT message, WPARAM w_param);
 Nanoseconds Platform_QueryTimestamp (void);
 void Platform_PushEvent (const PlatformEvent *event);
+void Platform_ResetTransientInputState (void);
+void Platform_UpdateModifierState (void);
 LRESULT CALLBACK Platform_WindowProc (HWND hwnd, UINT message, WPARAM w_param, LPARAM l_param);
 
 #endif // PLATFORM_INTERNAL_H
