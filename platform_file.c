@@ -19,6 +19,106 @@ static b32 Platform_PathToCString (String path, c8 *buffer, usize buffer_size)
     return true;
 }
 
+static String Platform_CopyCStringToArena (MemoryArena *arena, const c8 *source, usize count)
+{
+    c8 *buffer;
+
+    ASSERT(arena != NULL);
+
+    buffer = MemoryArena_PushArray(arena, c8, count);
+    if ((count > 0) && (buffer == NULL))
+    {
+        return String_Create(NULL, 0);
+    }
+
+    if (count > 0)
+    {
+        Memory_Copy(buffer, source, count);
+    }
+
+    return String_Create(buffer, count);
+}
+
+String Platform_GetWorkingDirectory (MemoryArena *arena)
+{
+    DWORD path_length;
+    c8 path_buffer[MAX_PATH];
+
+    ASSERT(arena != NULL);
+
+    path_length = GetCurrentDirectoryA(ARRAY_COUNT(path_buffer), path_buffer);
+    if ((path_length == 0) || (path_length >= ARRAY_COUNT(path_buffer)))
+    {
+        return String_Create(NULL, 0);
+    }
+
+    return Platform_CopyCStringToArena(arena, path_buffer, (usize) path_length);
+}
+
+String Platform_GetExecutablePath (MemoryArena *arena)
+{
+    DWORD path_length;
+    c8 path_buffer[MAX_PATH];
+
+    ASSERT(arena != NULL);
+
+    path_length = GetModuleFileNameA(NULL, path_buffer, ARRAY_COUNT(path_buffer));
+    if ((path_length == 0) || (path_length >= ARRAY_COUNT(path_buffer)))
+    {
+        return String_Create(NULL, 0);
+    }
+
+    return Platform_CopyCStringToArena(arena, path_buffer, (usize) path_length);
+}
+
+String Platform_GetExecutableDirectory (MemoryArena *arena)
+{
+    String executable_path;
+    usize index;
+
+    ASSERT(arena != NULL);
+
+    executable_path = Platform_GetExecutablePath(arena);
+    if (String_IsEmpty(executable_path))
+    {
+        return executable_path;
+    }
+
+    for (index = executable_path.count; index > 0; index -= 1)
+    {
+        c8 character;
+
+        character = executable_path.data[index - 1];
+        if ((character == '\\') || (character == '/'))
+        {
+            return String_Prefix(executable_path, index - 1);
+        }
+    }
+
+    return String_Create(NULL, 0);
+}
+
+String Platform_GetTempDirectory (MemoryArena *arena)
+{
+    DWORD path_length;
+    c8 path_buffer[MAX_PATH];
+
+    ASSERT(arena != NULL);
+
+    path_length = GetTempPathA(ARRAY_COUNT(path_buffer), path_buffer);
+    if ((path_length == 0) || (path_length >= ARRAY_COUNT(path_buffer)))
+    {
+        return String_Create(NULL, 0);
+    }
+
+    if ((path_length > 0) && ((path_buffer[path_length - 1] == '\\') || (path_buffer[path_length - 1] == '/')))
+    {
+        path_length -= 1;
+    }
+
+    return Platform_CopyCStringToArena(arena, path_buffer, (usize) path_length);
+}
+
 b32 Platform_FileExists (String path)
 {
     WIN32_FILE_ATTRIBUTE_DATA file_data;
