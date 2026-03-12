@@ -5,6 +5,7 @@
 #include "platform_window.h"
 #include "platform_cursor.h"
 #include "platform_display.h"
+#include "platform_dialog.h"
 #include "platform_time.h"
 #include "platform_thread.h"
 #include "platform_audio.h"
