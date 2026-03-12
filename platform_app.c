@@ -51,6 +51,7 @@ b32 Platform_Initialize (void)
         return false;
     }
 
+    PlatformDPI_Initialize();
     platform_state.cursor_shape = PLATFORM_CURSOR_SHAPE_ARROW;
     platform_state.current_cursor = LoadCursorA(NULL, IDC_ARROW);
     platform_state.cursor_is_visible = true;
@@ -377,6 +378,38 @@ LRESULT CALLBACK Platform_WindowProc (HWND hwnd, UINT message, WPARAM w_param, L
             event.timestamp = Platform_QueryTimestamp();
             event.data.window_resized.width = (i32) LOWORD(l_param);
             event.data.window_resized.height = (i32) HIWORD(l_param);
+            Platform_PushEvent(&event);
+            return 0;
+        }
+
+        case WM_DPICHANGED:
+        {
+            PlatformEvent event = {0};
+            RECT *suggested_rect;
+            u32 dpi_x;
+            u32 dpi_y;
+
+            dpi_x = (u32) LOWORD(w_param);
+            dpi_y = (u32) HIWORD(w_param);
+            suggested_rect = (RECT *) l_param;
+
+            if (suggested_rect != NULL)
+            {
+                SetWindowPos(hwnd,
+                             NULL,
+                             suggested_rect->left,
+                             suggested_rect->top,
+                             suggested_rect->right - suggested_rect->left,
+                             suggested_rect->bottom - suggested_rect->top,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+
+            event.type = PLATFORM_EVENT_WINDOW_DPI_CHANGED;
+            event.window = window;
+            event.timestamp = Platform_QueryTimestamp();
+            event.data.window_dpi_changed.dpi_x = dpi_x;
+            event.data.window_dpi_changed.dpi_y = dpi_y;
+            event.data.window_dpi_changed.scale = (f32) dpi_x / 96.0f;
             Platform_PushEvent(&event);
             return 0;
         }

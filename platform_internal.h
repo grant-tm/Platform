@@ -13,6 +13,7 @@
 
 void PlatformAudio_Initialize (void);
 void PlatformAudio_Shutdown (void);
+void PlatformDPI_Initialize (void);
 
 typedef struct PlatformWindowState
 {

@@ -12,6 +12,7 @@ typedef enum PlatformEventType
     PLATFORM_EVENT_WINDOW_CLOSE_REQUESTED,
     PLATFORM_EVENT_WINDOW_MOVED,
     PLATFORM_EVENT_WINDOW_RESIZED,
+    PLATFORM_EVENT_WINDOW_DPI_CHANGED,
     PLATFORM_EVENT_WINDOW_FOCUS_GAINED,
     PLATFORM_EVENT_WINDOW_FOCUS_LOST,
     PLATFORM_EVENT_KEY_DOWN,
@@ -137,6 +138,13 @@ typedef struct PlatformEventMouseWheel
     i32 y;
 } PlatformEventMouseWheel;
 
+typedef struct PlatformEventWindowDPIChanged
+{
+    u32 dpi_x;
+    u32 dpi_y;
+    f32 scale;
+} PlatformEventWindowDPIChanged;
+
 typedef struct PlatformEvent
 {
     PlatformEventType type;
@@ -147,6 +155,7 @@ typedef struct PlatformEvent
     {
         PlatformEventWindowMoved window_moved;
         PlatformEventWindowResized window_resized;
+        PlatformEventWindowDPIChanged window_dpi_changed;
         PlatformEventKey key;
         PlatformEventTextInput text_input;
         PlatformEventMouseMove mouse_move;
