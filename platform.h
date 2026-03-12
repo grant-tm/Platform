@@ -7,6 +7,7 @@
 #include "platform_thread.h"
 #include "platform_audio.h"
 #include "platform_input.h"
+#include "platform_clipboard.h"
 #include "platform_file.h"
 #include "platform_app.h"
 
