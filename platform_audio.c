@@ -81,6 +81,16 @@ typedef struct PlatformAudioState
     PlatformAudioStreamState streams[PLATFORM_MAX_AUDIO_STREAMS];
 } PlatformAudioState;
 
+typedef struct PlatformAudioFrameRing
+{
+    f32 *storage;
+    f32 **channels;
+    u32 channel_count;
+    u32 capacity;
+    u32 start;
+    u32 count;
+} PlatformAudioFrameRing;
+
 static PlatformAudioState platform_audio_state = {0};
 
 static void Platform_ReleaseCOMObject (IUnknown *unknown)
@@ -473,6 +483,246 @@ static b32 PlatformAudio_FindSupportedExclusiveOutputFormat (
     return false;
 }
 
+static b32 PlatformAudio_FindSupportedExclusiveFormatAtSampleRate (
+    IAudioClient *audio_client,
+    u32 channel_count,
+    u32 sample_rate,
+    WAVEFORMATEXTENSIBLE *format)
+{
+    static const struct
+    {
+        u32 bits_per_sample;
+        const GUID *sub_format;
+    } candidate_formats[] =
+    {
+        {32, &KSDATAFORMAT_SUBTYPE_IEEE_FLOAT},
+        {32, &KSDATAFORMAT_SUBTYPE_PCM},
+        {24, &KSDATAFORMAT_SUBTYPE_PCM},
+        {16, &KSDATAFORMAT_SUBTYPE_PCM},
+    };
+    usize format_index;
+
+    ASSERT(audio_client != NULL);
+    ASSERT(format != NULL);
+
+    for (format_index = 0; format_index < ARRAY_COUNT(candidate_formats); format_index += 1)
+    {
+        HRESULT result;
+
+        if (!PlatformAudio_BuildExclusiveOutputFormat(
+                channel_count,
+                sample_rate,
+                candidate_formats[format_index].bits_per_sample,
+                candidate_formats[format_index].sub_format,
+                format))
+        {
+            continue;
+        }
+
+        result = audio_client->lpVtbl->IsFormatSupported(
+            audio_client,
+            AUDCLNT_SHAREMODE_EXCLUSIVE,
+            (WAVEFORMATEX *) format,
+            NULL);
+        if (result == S_OK)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static b32 PlatformAudio_FindSupportedExclusiveDuplexFormats (
+    IAudioClient *output_audio_client,
+    u32 output_channel_count,
+    IAudioClient *input_audio_client,
+    u32 input_channel_count,
+    u32 requested_sample_rate,
+    u32 output_fallback_sample_rate,
+    u32 input_fallback_sample_rate,
+    WAVEFORMATEXTENSIBLE *output_format,
+    WAVEFORMATEXTENSIBLE *input_format)
+{
+    static const u32 common_sample_rates[] = {48000, 44100, 96000, 88200, 192000};
+    u32 sample_rates[8];
+    usize sample_rate_count;
+    usize sample_rate_index;
+
+    ASSERT(output_audio_client != NULL);
+    ASSERT(input_audio_client != NULL);
+    ASSERT(output_format != NULL);
+    ASSERT(input_format != NULL);
+
+    sample_rate_count = 0;
+    if (requested_sample_rate > 0)
+    {
+        sample_rates[sample_rate_count] = requested_sample_rate;
+        sample_rate_count += 1;
+    }
+
+    if ((output_fallback_sample_rate > 0) && (output_fallback_sample_rate != requested_sample_rate))
+    {
+        sample_rates[sample_rate_count] = output_fallback_sample_rate;
+        sample_rate_count += 1;
+    }
+
+    if ((input_fallback_sample_rate > 0) &&
+        (input_fallback_sample_rate != requested_sample_rate) &&
+        (input_fallback_sample_rate != output_fallback_sample_rate))
+    {
+        sample_rates[sample_rate_count] = input_fallback_sample_rate;
+        sample_rate_count += 1;
+    }
+
+    for (sample_rate_index = 0; sample_rate_index < ARRAY_COUNT(common_sample_rates); sample_rate_index += 1)
+    {
+        u32 sample_rate;
+        b32 already_added;
+        usize existing_index;
+
+        sample_rate = common_sample_rates[sample_rate_index];
+        already_added = false;
+        for (existing_index = 0; existing_index < sample_rate_count; existing_index += 1)
+        {
+            if (sample_rates[existing_index] == sample_rate)
+            {
+                already_added = true;
+                break;
+            }
+        }
+
+        if (!already_added)
+        {
+            sample_rates[sample_rate_count] = sample_rate;
+            sample_rate_count += 1;
+        }
+    }
+
+    for (sample_rate_index = 0; sample_rate_index < sample_rate_count; sample_rate_index += 1)
+    {
+        u32 sample_rate;
+
+        sample_rate = sample_rates[sample_rate_index];
+        if (PlatformAudio_FindSupportedExclusiveFormatAtSampleRate(
+                output_audio_client,
+                output_channel_count,
+                sample_rate,
+                output_format) &&
+            PlatformAudio_FindSupportedExclusiveFormatAtSampleRate(
+                input_audio_client,
+                input_channel_count,
+                sample_rate,
+                input_format))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void PlatformAudioFrameRing_Init (
+    PlatformAudioFrameRing *ring,
+    f32 *storage,
+    f32 **channels,
+    u32 channel_count,
+    u32 capacity)
+{
+    u32 channel_index;
+
+    ASSERT(ring != NULL);
+    ASSERT(storage != NULL);
+    ASSERT(channels != NULL);
+
+    ring->storage = storage;
+    ring->channels = channels;
+    ring->channel_count = channel_count;
+    ring->capacity = capacity;
+    ring->start = 0;
+    ring->count = 0;
+
+    for (channel_index = 0; channel_index < channel_count; channel_index += 1)
+    {
+        ring->channels[channel_index] = storage + ((usize) channel_index * capacity);
+    }
+}
+
+static b32 PlatformAudioFrameRing_Push (
+    PlatformAudioFrameRing *ring,
+    f32 **source_channels,
+    u32 frame_count)
+{
+    b32 overflow_occurred;
+    u32 frame_index;
+    u32 channel_index;
+
+    ASSERT(ring != NULL);
+    ASSERT(source_channels != NULL);
+
+    overflow_occurred = false;
+    for (frame_index = 0; frame_index < frame_count; frame_index += 1)
+    {
+        u32 write_index;
+
+        if (ring->count == ring->capacity)
+        {
+            ring->start = (ring->start + 1) % ring->capacity;
+            ring->count -= 1;
+            overflow_occurred = true;
+        }
+
+        write_index = (ring->start + ring->count) % ring->capacity;
+        for (channel_index = 0; channel_index < ring->channel_count; channel_index += 1)
+        {
+            ring->channels[channel_index][write_index] = source_channels[channel_index][frame_index];
+        }
+
+        ring->count += 1;
+    }
+
+    return overflow_occurred;
+}
+
+static b32 PlatformAudioFrameRing_Pop (
+    PlatformAudioFrameRing *ring,
+    f32 **destination_channels,
+    u32 frame_count)
+{
+    b32 underflow_occurred;
+    u32 frame_index;
+    u32 channel_index;
+
+    ASSERT(ring != NULL);
+    ASSERT(destination_channels != NULL);
+
+    underflow_occurred = false;
+    for (frame_index = 0; frame_index < frame_count; frame_index += 1)
+    {
+        if (ring->count > 0)
+        {
+            for (channel_index = 0; channel_index < ring->channel_count; channel_index += 1)
+            {
+                destination_channels[channel_index][frame_index] = ring->channels[channel_index][ring->start];
+            }
+
+            ring->start = (ring->start + 1) % ring->capacity;
+            ring->count -= 1;
+        }
+        else
+        {
+            for (channel_index = 0; channel_index < ring->channel_count; channel_index += 1)
+            {
+                destination_channels[channel_index][frame_index] = 0.0f;
+            }
+
+            underflow_occurred = true;
+        }
+    }
+
+    return underflow_occurred;
+}
+
 static b32 PlatformAudio_IsFloatFormat (const WAVEFORMATEX *format)
 {
     const WAVEFORMATEXTENSIBLE *extensible_format;
@@ -837,6 +1087,63 @@ static void PlatformAudio_RunInputCallback (
 
     stream_state->desc.callback(input_buffer, output_buffer, &callback_info, stream_state->desc.user_data);
     stream_state->input_sample_index += frame_count;
+}
+
+static void PlatformAudio_RunDuplexCallback (
+    PlatformAudioStreamState *stream_state,
+    f32 **input_channels,
+    byte *backend_output,
+    const WAVEFORMATEX *backend_output_format,
+    f32 *output_planar_storage,
+    f32 **output_planar_channels,
+    u32 frame_count,
+    b32 input_overflow_occurred,
+    b32 output_underflow_occurred)
+{
+    PlatformAudioBuffer input_buffer;
+    PlatformAudioBuffer output_buffer;
+    PlatformAudioCallbackInfo callback_info;
+    u32 channel_index;
+
+    ASSERT(stream_state != NULL);
+    ASSERT(input_channels != NULL);
+    ASSERT(backend_output != NULL);
+    ASSERT(backend_output_format != NULL);
+    ASSERT(output_planar_storage != NULL);
+    ASSERT(output_planar_channels != NULL);
+
+    for (channel_index = 0; channel_index < stream_state->info.output_channel_count; channel_index += 1)
+    {
+        output_planar_channels[channel_index] = output_planar_storage + ((usize) channel_index * frame_count);
+        Memory_Zero(output_planar_channels[channel_index], sizeof(f32) * frame_count);
+    }
+
+    input_buffer.channels = input_channels;
+    input_buffer.channel_count = stream_state->info.input_channel_count;
+    input_buffer.frame_count = frame_count;
+
+    output_buffer.channels = output_planar_channels;
+    output_buffer.channel_count = stream_state->info.output_channel_count;
+    output_buffer.frame_count = frame_count;
+
+    callback_info.input_sample_index = stream_state->input_sample_index;
+    callback_info.output_sample_index = stream_state->output_sample_index;
+    callback_info.callback_time = Platform_QueryTimestamp();
+    callback_info.input_latency = stream_state->info.input_latency;
+    callback_info.output_latency = stream_state->info.output_latency;
+    callback_info.input_overflow_occurred = input_overflow_occurred;
+    callback_info.output_underflow_occurred = output_underflow_occurred;
+
+    stream_state->desc.callback(input_buffer, output_buffer, &callback_info, stream_state->desc.user_data);
+    PlatformAudio_ConvertPlanarF32ToFormat(
+        backend_output,
+        backend_output_format,
+        output_planar_channels,
+        stream_state->info.output_channel_count,
+        frame_count);
+
+    stream_state->input_sample_index += frame_count;
+    stream_state->output_sample_index += frame_count;
 }
 
 static DWORD WINAPI PlatformAudio_OutputThreadProc (LPVOID parameter)
@@ -1384,6 +1691,531 @@ startup_failed:
     goto cleanup;
 }
 
+static DWORD WINAPI PlatformAudio_DuplexThreadProc (LPVOID parameter)
+{
+    PlatformAudioStreamState *stream_state;
+    PlatformAudioDeviceState *output_device_state;
+    PlatformAudioDeviceState *input_device_state;
+    HRESULT result;
+    IMMDevice *output_device;
+    IMMDevice *input_device;
+    IAudioClient *output_audio_client;
+    IAudioClient *input_audio_client;
+    IAudioRenderClient *render_client;
+    IAudioCaptureClient *capture_client;
+    HANDLE mmcss_handle;
+    DWORD task_index;
+    DWORD output_buffer_frame_count;
+    DWORD input_buffer_frame_count;
+    REFERENCE_TIME output_default_period;
+    REFERENCE_TIME output_minimum_period;
+    REFERENCE_TIME input_default_period;
+    REFERENCE_TIME input_minimum_period;
+    REFERENCE_TIME output_stream_latency;
+    REFERENCE_TIME input_stream_latency;
+    WAVEFORMATEX *output_mix_format;
+    WAVEFORMATEX *input_mix_format;
+    WAVEFORMATEXTENSIBLE output_wave_format;
+    WAVEFORMATEXTENSIBLE input_wave_format;
+    WAVEFORMATEX *active_output_format;
+    WAVEFORMATEX *active_input_format;
+    f32 *capture_packet_storage;
+    f32 **capture_packet_channels;
+    f32 *duplex_input_storage;
+    f32 **duplex_input_channels;
+    f32 *duplex_output_storage;
+    f32 **duplex_output_channels;
+    f32 *ring_storage;
+    f32 **ring_channels;
+    PlatformAudioFrameRing input_ring;
+    b32 co_initialized;
+    b32 ring_overflow_occurred;
+
+    stream_state = (PlatformAudioStreamState *) parameter;
+    ASSERT(stream_state != NULL);
+
+    output_device = NULL;
+    input_device = NULL;
+    output_audio_client = NULL;
+    input_audio_client = NULL;
+    render_client = NULL;
+    capture_client = NULL;
+    mmcss_handle = NULL;
+    task_index = 0;
+    output_mix_format = NULL;
+    input_mix_format = NULL;
+    active_output_format = NULL;
+    active_input_format = NULL;
+    capture_packet_storage = NULL;
+    capture_packet_channels = NULL;
+    duplex_input_storage = NULL;
+    duplex_input_channels = NULL;
+    duplex_output_storage = NULL;
+    duplex_output_channels = NULL;
+    ring_storage = NULL;
+    ring_channels = NULL;
+    co_initialized = false;
+    ring_overflow_occurred = false;
+    InterlockedExchange(&stream_state->start_succeeded, 0);
+
+    result = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    if (SUCCEEDED(result))
+    {
+        co_initialized = true;
+    }
+    else if (result != RPC_E_CHANGED_MODE)
+    {
+        goto startup_failed;
+    }
+
+    output_device_state = PlatformAudio_GetDeviceState(stream_state->info.output_device);
+    input_device_state = PlatformAudio_GetDeviceState(stream_state->info.input_device);
+    if ((output_device_state == NULL) || (input_device_state == NULL))
+    {
+        goto startup_failed;
+    }
+
+    result = PlatformAudio_CreateDeviceFromUTF8ID(output_device_state->device_id, &output_device);
+    if (FAILED(result))
+    {
+        goto startup_failed;
+    }
+
+    result = PlatformAudio_CreateDeviceFromUTF8ID(input_device_state->device_id, &input_device);
+    if (FAILED(result))
+    {
+        goto startup_failed;
+    }
+
+    result = output_device->lpVtbl->Activate(output_device, &IID_IAudioClient, CLSCTX_ALL, NULL, (void **) &output_audio_client);
+    if (FAILED(result))
+    {
+        goto startup_failed;
+    }
+
+    result = input_device->lpVtbl->Activate(input_device, &IID_IAudioClient, CLSCTX_ALL, NULL, (void **) &input_audio_client);
+    if (FAILED(result))
+    {
+        goto startup_failed;
+    }
+
+    result = output_audio_client->lpVtbl->GetMixFormat(output_audio_client, &output_mix_format);
+    if (FAILED(result) || (output_mix_format == NULL))
+    {
+        goto startup_failed;
+    }
+
+    result = input_audio_client->lpVtbl->GetMixFormat(input_audio_client, &input_mix_format);
+    if (FAILED(result) || (input_mix_format == NULL))
+    {
+        goto startup_failed;
+    }
+
+    result = output_audio_client->lpVtbl->GetDevicePeriod(output_audio_client, &output_default_period, &output_minimum_period);
+    if (FAILED(result))
+    {
+        goto startup_failed;
+    }
+
+    result = input_audio_client->lpVtbl->GetDevicePeriod(input_audio_client, &input_default_period, &input_minimum_period);
+    if (FAILED(result))
+    {
+        goto startup_failed;
+    }
+
+    if ((output_mix_format->nChannels != stream_state->info.output_channel_count) ||
+        (input_mix_format->nChannels != stream_state->info.input_channel_count))
+    {
+        goto startup_failed;
+    }
+
+    if (!PlatformAudio_FindSupportedExclusiveDuplexFormats(
+            output_audio_client,
+            stream_state->info.output_channel_count,
+            input_audio_client,
+            stream_state->info.input_channel_count,
+            stream_state->info.actual_sample_rate,
+            output_mix_format->nSamplesPerSec,
+            input_mix_format->nSamplesPerSec,
+            &output_wave_format,
+            &input_wave_format))
+    {
+        result = AUDCLNT_E_UNSUPPORTED_FORMAT;
+        goto startup_failed;
+    }
+
+    active_output_format = (WAVEFORMATEX *) &output_wave_format;
+    active_input_format = (WAVEFORMATEX *) &input_wave_format;
+    stream_state->info.actual_sample_rate = active_output_format->nSamplesPerSec;
+
+    result = output_audio_client->lpVtbl->Initialize(
+        output_audio_client,
+        AUDCLNT_SHAREMODE_EXCLUSIVE,
+        0,
+        output_minimum_period,
+        output_minimum_period,
+        active_output_format,
+        NULL);
+    if (FAILED(result))
+    {
+        goto startup_failed;
+    }
+
+    result = input_audio_client->lpVtbl->Initialize(
+        input_audio_client,
+        AUDCLNT_SHAREMODE_EXCLUSIVE,
+        0,
+        input_minimum_period,
+        input_minimum_period,
+        active_input_format,
+        NULL);
+    if (FAILED(result))
+    {
+        goto startup_failed;
+    }
+
+    result = output_audio_client->lpVtbl->GetBufferSize(output_audio_client, &output_buffer_frame_count);
+    if (FAILED(result) || (output_buffer_frame_count == 0))
+    {
+        goto startup_failed;
+    }
+
+    result = input_audio_client->lpVtbl->GetBufferSize(input_audio_client, &input_buffer_frame_count);
+    if (FAILED(result) || (input_buffer_frame_count == 0))
+    {
+        goto startup_failed;
+    }
+
+    result = output_audio_client->lpVtbl->GetStreamLatency(output_audio_client, &output_stream_latency);
+    if (FAILED(result))
+    {
+        output_stream_latency = output_minimum_period;
+    }
+
+    result = input_audio_client->lpVtbl->GetStreamLatency(input_audio_client, &input_stream_latency);
+    if (FAILED(result))
+    {
+        input_stream_latency = input_minimum_period;
+    }
+
+    result = output_audio_client->lpVtbl->GetService(output_audio_client, &IID_IAudioRenderClient, (void **) &render_client);
+    if (FAILED(result))
+    {
+        goto startup_failed;
+    }
+
+    result = input_audio_client->lpVtbl->GetService(input_audio_client, &IID_IAudioCaptureClient, (void **) &capture_client);
+    if (FAILED(result))
+    {
+        goto startup_failed;
+    }
+
+    capture_packet_storage = (f32 *) HeapAlloc(
+        GetProcessHeap(),
+        HEAP_ZERO_MEMORY,
+        sizeof(f32) * (usize) input_buffer_frame_count * (usize) stream_state->info.input_channel_count);
+    capture_packet_channels = (f32 **) HeapAlloc(
+        GetProcessHeap(),
+        HEAP_ZERO_MEMORY,
+        sizeof(f32 *) * (usize) stream_state->info.input_channel_count);
+    duplex_input_storage = (f32 *) HeapAlloc(
+        GetProcessHeap(),
+        HEAP_ZERO_MEMORY,
+        sizeof(f32) * (usize) output_buffer_frame_count * (usize) stream_state->info.input_channel_count);
+    duplex_input_channels = (f32 **) HeapAlloc(
+        GetProcessHeap(),
+        HEAP_ZERO_MEMORY,
+        sizeof(f32 *) * (usize) stream_state->info.input_channel_count);
+    duplex_output_storage = (f32 *) HeapAlloc(
+        GetProcessHeap(),
+        HEAP_ZERO_MEMORY,
+        sizeof(f32) * (usize) output_buffer_frame_count * (usize) stream_state->info.output_channel_count);
+    duplex_output_channels = (f32 **) HeapAlloc(
+        GetProcessHeap(),
+        HEAP_ZERO_MEMORY,
+        sizeof(f32 *) * (usize) stream_state->info.output_channel_count);
+    ring_storage = (f32 *) HeapAlloc(
+        GetProcessHeap(),
+        HEAP_ZERO_MEMORY,
+        sizeof(f32) * (usize) (input_buffer_frame_count * 4) * (usize) stream_state->info.input_channel_count);
+    ring_channels = (f32 **) HeapAlloc(
+        GetProcessHeap(),
+        HEAP_ZERO_MEMORY,
+        sizeof(f32 *) * (usize) stream_state->info.input_channel_count);
+    if ((capture_packet_storage == NULL) || (capture_packet_channels == NULL) ||
+        (duplex_input_storage == NULL) || (duplex_input_channels == NULL) ||
+        (duplex_output_storage == NULL) || (duplex_output_channels == NULL) ||
+        (ring_storage == NULL) || (ring_channels == NULL))
+    {
+        goto startup_failed;
+    }
+
+    PlatformAudioFrameRing_Init(
+        &input_ring,
+        ring_storage,
+        ring_channels,
+        stream_state->info.input_channel_count,
+        input_buffer_frame_count * 4);
+
+    {
+        u32 channel_index;
+
+        for (channel_index = 0; channel_index < stream_state->info.input_channel_count; channel_index += 1)
+        {
+            capture_packet_channels[channel_index] = capture_packet_storage + ((usize) channel_index * input_buffer_frame_count);
+            duplex_input_channels[channel_index] = duplex_input_storage + ((usize) channel_index * output_buffer_frame_count);
+        }
+
+        for (channel_index = 0; channel_index < stream_state->info.output_channel_count; channel_index += 1)
+        {
+            duplex_output_channels[channel_index] = duplex_output_storage + ((usize) channel_index * output_buffer_frame_count);
+        }
+    }
+
+    mmcss_handle = AvSetMmThreadCharacteristicsA("Pro Audio", &task_index);
+
+    stream_state->info.actual_frame_count = output_buffer_frame_count;
+    stream_state->info.input_latency = PlatformAudio_ReferenceTimeToNanoseconds(input_stream_latency);
+    stream_state->info.output_latency = PlatformAudio_ReferenceTimeToNanoseconds(output_stream_latency);
+    stream_state->input_sample_index = 0;
+    stream_state->output_sample_index = 0;
+
+    result = input_audio_client->lpVtbl->Start(input_audio_client);
+    if (FAILED(result))
+    {
+        goto startup_failed;
+    }
+
+    {
+        BYTE *render_buffer;
+
+        result = render_client->lpVtbl->GetBuffer(render_client, output_buffer_frame_count, &render_buffer);
+        if (FAILED(result))
+        {
+            goto startup_failed;
+        }
+
+        PlatformAudioFrameRing_Pop(&input_ring, duplex_input_channels, output_buffer_frame_count);
+        PlatformAudio_RunDuplexCallback(
+            stream_state,
+            duplex_input_channels,
+            render_buffer,
+            active_output_format,
+            duplex_output_storage,
+            duplex_output_channels,
+            output_buffer_frame_count,
+            false,
+            true);
+
+        result = render_client->lpVtbl->ReleaseBuffer(render_client, output_buffer_frame_count, 0);
+        if (FAILED(result))
+        {
+            goto startup_failed;
+        }
+    }
+
+    result = output_audio_client->lpVtbl->Start(output_audio_client);
+    if (FAILED(result))
+    {
+        goto startup_failed;
+    }
+
+    stream_state->info.is_running = true;
+    InterlockedExchange(&stream_state->thread_is_active, 1);
+    InterlockedExchange(&stream_state->start_succeeded, 1);
+    SetEvent(stream_state->started_event);
+
+    for (;;)
+    {
+        DWORD wait_result;
+        Milliseconds sleep_duration;
+
+        sleep_duration = MAX(
+            1,
+            Milliseconds_FromNanoseconds(
+                MIN(
+                    PlatformAudio_ReferenceTimeToNanoseconds(output_minimum_period),
+                    PlatformAudio_ReferenceTimeToNanoseconds(input_minimum_period)) / 2));
+        wait_result = WaitForSingleObject(stream_state->stop_event, (DWORD) sleep_duration);
+        if (wait_result == WAIT_OBJECT_0)
+        {
+            break;
+        }
+
+        if (wait_result == WAIT_TIMEOUT)
+        {
+            UINT32 packet_length;
+            UINT32 padding;
+            UINT32 frames_to_render;
+            BYTE *render_buffer;
+            b32 input_overflow_for_callback;
+            b32 input_underflow_for_callback;
+
+            result = capture_client->lpVtbl->GetNextPacketSize(capture_client, &packet_length);
+            if (FAILED(result))
+            {
+                break;
+            }
+
+            while (packet_length > 0)
+            {
+                BYTE *capture_buffer;
+                UINT32 frames_available;
+                DWORD flags;
+                b32 packet_overflow;
+
+                result = capture_client->lpVtbl->GetBuffer(
+                    capture_client,
+                    &capture_buffer,
+                    &frames_available,
+                    &flags,
+                    NULL,
+                    NULL);
+                if (FAILED(result))
+                {
+                    break;
+                }
+
+                PlatformAudio_ConvertFormatToPlanarF32(
+                    capture_packet_channels,
+                    capture_buffer,
+                    active_input_format,
+                    stream_state->info.input_channel_count,
+                    frames_available,
+                    (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0);
+                packet_overflow = PlatformAudioFrameRing_Push(&input_ring, capture_packet_channels, frames_available);
+                ring_overflow_occurred = ring_overflow_occurred || packet_overflow || ((flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) != 0);
+
+                result = capture_client->lpVtbl->ReleaseBuffer(capture_client, frames_available);
+                if (FAILED(result))
+                {
+                    break;
+                }
+
+                result = capture_client->lpVtbl->GetNextPacketSize(capture_client, &packet_length);
+                if (FAILED(result))
+                {
+                    break;
+                }
+            }
+
+            if (FAILED(result))
+            {
+                break;
+            }
+
+            result = output_audio_client->lpVtbl->GetCurrentPadding(output_audio_client, &padding);
+            if (FAILED(result))
+            {
+                break;
+            }
+
+            frames_to_render = output_buffer_frame_count - padding;
+            if (frames_to_render > 0)
+            {
+                result = render_client->lpVtbl->GetBuffer(render_client, frames_to_render, &render_buffer);
+                if (FAILED(result))
+                {
+                    break;
+                }
+
+                input_underflow_for_callback = PlatformAudioFrameRing_Pop(&input_ring, duplex_input_channels, frames_to_render);
+                input_overflow_for_callback = ring_overflow_occurred;
+                ring_overflow_occurred = false;
+
+                PlatformAudio_RunDuplexCallback(
+                    stream_state,
+                    duplex_input_channels,
+                    render_buffer,
+                    active_output_format,
+                    duplex_output_storage,
+                    duplex_output_channels,
+                    frames_to_render,
+                    input_overflow_for_callback,
+                    input_underflow_for_callback);
+
+                result = render_client->lpVtbl->ReleaseBuffer(render_client, frames_to_render, 0);
+                if (FAILED(result))
+                {
+                    break;
+                }
+            }
+
+            continue;
+        }
+
+        break;
+    }
+
+    output_audio_client->lpVtbl->Stop(output_audio_client);
+    input_audio_client->lpVtbl->Stop(input_audio_client);
+
+cleanup:
+    stream_state->info.is_running = false;
+    InterlockedExchange(&stream_state->thread_is_active, 0);
+
+    if (mmcss_handle != NULL)
+    {
+        AvRevertMmThreadCharacteristics(mmcss_handle);
+    }
+    if (ring_channels != NULL)
+    {
+        HeapFree(GetProcessHeap(), 0, ring_channels);
+    }
+    if (ring_storage != NULL)
+    {
+        HeapFree(GetProcessHeap(), 0, ring_storage);
+    }
+    if (duplex_output_channels != NULL)
+    {
+        HeapFree(GetProcessHeap(), 0, duplex_output_channels);
+    }
+    if (duplex_output_storage != NULL)
+    {
+        HeapFree(GetProcessHeap(), 0, duplex_output_storage);
+    }
+    if (duplex_input_channels != NULL)
+    {
+        HeapFree(GetProcessHeap(), 0, duplex_input_channels);
+    }
+    if (duplex_input_storage != NULL)
+    {
+        HeapFree(GetProcessHeap(), 0, duplex_input_storage);
+    }
+    if (capture_packet_channels != NULL)
+    {
+        HeapFree(GetProcessHeap(), 0, capture_packet_channels);
+    }
+    if (capture_packet_storage != NULL)
+    {
+        HeapFree(GetProcessHeap(), 0, capture_packet_storage);
+    }
+    if (input_mix_format != NULL)
+    {
+        CoTaskMemFree(input_mix_format);
+    }
+    if (output_mix_format != NULL)
+    {
+        CoTaskMemFree(output_mix_format);
+    }
+    Platform_ReleaseCOMObject((IUnknown *) capture_client);
+    Platform_ReleaseCOMObject((IUnknown *) render_client);
+    Platform_ReleaseCOMObject((IUnknown *) input_audio_client);
+    Platform_ReleaseCOMObject((IUnknown *) output_audio_client);
+    Platform_ReleaseCOMObject((IUnknown *) input_device);
+    Platform_ReleaseCOMObject((IUnknown *) output_device);
+    if (co_initialized)
+    {
+        CoUninitialize();
+    }
+
+    return 0;
+
+startup_failed:
+    SetEvent(stream_state->started_event);
+    goto cleanup;
+}
+
 static b32 PlatformAudio_LoadDeviceState (PlatformAudioDeviceState *device_state, IMMDevice *device, b32 is_default_input, b32 is_default_output)
 {
     HRESULT result;
@@ -1833,12 +2665,6 @@ PlatformAudioStream PlatformAudioStream_Create (const PlatformAudioStreamDesc *d
         return PLATFORM_AUDIO_STREAM_INVALID;
     }
 
-    if ((desc->input_channel_count > 0) && (desc->output_channel_count > 0))
-    {
-        /* Duplex is not implemented in this slice. */
-        return PLATFORM_AUDIO_STREAM_INVALID;
-    }
-
     if ((desc->requested_sample_rate == 0) || (desc->requested_frame_count == 0))
     {
         return PLATFORM_AUDIO_STREAM_INVALID;
@@ -1943,7 +2769,9 @@ b32 PlatformAudioStream_Start (PlatformAudioStream stream)
     stream_state->thread_handle = CreateThread(
         NULL,
         0,
-        (stream_state->info.output_channel_count > 0) ? PlatformAudio_OutputThreadProc : PlatformAudio_InputThreadProc,
+        ((stream_state->info.input_channel_count > 0) && (stream_state->info.output_channel_count > 0))
+            ? PlatformAudio_DuplexThreadProc
+            : ((stream_state->info.output_channel_count > 0) ? PlatformAudio_OutputThreadProc : PlatformAudio_InputThreadProc),
         stream_state,
         0,
         &thread_id);
