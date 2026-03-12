@@ -51,6 +51,7 @@ b32 Platform_Initialize (void)
         return false;
     }
 
+    PlatformAudio_Initialize();
     platform_state.is_initialized = true;
     return true;
 }
@@ -77,6 +78,7 @@ void Platform_Shutdown (void)
         UnregisterClassW(PLATFORM_WINDOW_CLASS_NAME, platform_state.instance);
     }
 
+    PlatformAudio_Shutdown();
     Memory_Zero(&platform_state, sizeof(platform_state));
 }
 

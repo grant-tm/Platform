@@ -11,6 +11,9 @@
 #define PLATFORM_MAX_PENDING_EVENTS 1024
 #define PLATFORM_WINDOW_CLASS_NAME L"MorganAudioPlatformWindowClass"
 
+void PlatformAudio_Initialize (void);
+void PlatformAudio_Shutdown (void);
+
 typedef struct PlatformWindowState
 {
     b32 is_used;
