@@ -723,6 +723,24 @@ static b32 PlatformAudioFrameRing_Pop (
     return underflow_occurred;
 }
 
+static u32 PlatformAudioFrameRing_GetCount (const PlatformAudioFrameRing *ring)
+{
+    ASSERT(ring != NULL);
+    return ring->count;
+}
+
+static u32 PlatformAudioFrameRing_DiscardOldest (PlatformAudioFrameRing *ring, u32 frame_count)
+{
+    u32 discarded_count;
+
+    ASSERT(ring != NULL);
+
+    discarded_count = MIN(frame_count, ring->count);
+    ring->start = (ring->start + discarded_count) % ring->capacity;
+    ring->count -= discarded_count;
+    return discarded_count;
+}
+
 static b32 PlatformAudio_IsFloatFormat (const WAVEFORMATEX *format)
 {
     const WAVEFORMATEXTENSIBLE *extensible_format;
@@ -1144,6 +1162,77 @@ static void PlatformAudio_RunDuplexCallback (
 
     stream_state->input_sample_index += frame_count;
     stream_state->output_sample_index += frame_count;
+}
+
+static HRESULT PlatformAudio_DrainCaptureClientToRing (
+    IAudioCaptureClient *capture_client,
+    const WAVEFORMATEX *capture_format,
+    u32 channel_count,
+    f32 **capture_packet_channels,
+    PlatformAudioFrameRing *input_ring,
+    b32 *overflow_or_discontinuity_occurred)
+{
+    HRESULT result;
+    UINT32 packet_length;
+
+    ASSERT(capture_client != NULL);
+    ASSERT(capture_format != NULL);
+    ASSERT(capture_packet_channels != NULL);
+    ASSERT(input_ring != NULL);
+    ASSERT(overflow_or_discontinuity_occurred != NULL);
+
+    result = capture_client->lpVtbl->GetNextPacketSize(capture_client, &packet_length);
+    if (FAILED(result))
+    {
+        return result;
+    }
+
+    while (packet_length > 0)
+    {
+        BYTE *capture_buffer;
+        UINT32 frames_available;
+        DWORD flags;
+        b32 packet_overflow;
+
+        result = capture_client->lpVtbl->GetBuffer(
+            capture_client,
+            &capture_buffer,
+            &frames_available,
+            &flags,
+            NULL,
+            NULL);
+        if (FAILED(result))
+        {
+            return result;
+        }
+
+        PlatformAudio_ConvertFormatToPlanarF32(
+            capture_packet_channels,
+            capture_buffer,
+            capture_format,
+            channel_count,
+            frames_available,
+            (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0);
+        packet_overflow = PlatformAudioFrameRing_Push(input_ring, capture_packet_channels, frames_available);
+        *overflow_or_discontinuity_occurred =
+            *overflow_or_discontinuity_occurred ||
+            packet_overflow ||
+            ((flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) != 0);
+
+        result = capture_client->lpVtbl->ReleaseBuffer(capture_client, frames_available);
+        if (FAILED(result))
+        {
+            return result;
+        }
+
+        result = capture_client->lpVtbl->GetNextPacketSize(capture_client, &packet_length);
+        if (FAILED(result))
+        {
+            return result;
+        }
+    }
+
+    return S_OK;
 }
 
 static DWORD WINAPI PlatformAudio_OutputThreadProc (LPVOID parameter)
@@ -1728,6 +1817,8 @@ static DWORD WINAPI PlatformAudio_DuplexThreadProc (LPVOID parameter)
     f32 *ring_storage;
     f32 **ring_channels;
     PlatformAudioFrameRing input_ring;
+    u32 target_input_frames;
+    u32 max_input_frames;
     b32 co_initialized;
     b32 ring_overflow_occurred;
 
@@ -1956,6 +2047,8 @@ static DWORD WINAPI PlatformAudio_DuplexThreadProc (LPVOID parameter)
         ring_channels,
         stream_state->info.input_channel_count,
         input_buffer_frame_count * 4);
+    target_input_frames = output_buffer_frame_count;
+    max_input_frames = target_input_frames + input_buffer_frame_count;
 
     {
         u32 channel_index;
@@ -1975,7 +2068,9 @@ static DWORD WINAPI PlatformAudio_DuplexThreadProc (LPVOID parameter)
     mmcss_handle = AvSetMmThreadCharacteristicsA("Pro Audio", &task_index);
 
     stream_state->info.actual_frame_count = output_buffer_frame_count;
-    stream_state->info.input_latency = PlatformAudio_ReferenceTimeToNanoseconds(input_stream_latency);
+    stream_state->info.input_latency =
+        PlatformAudio_ReferenceTimeToNanoseconds(input_stream_latency) +
+        Nanoseconds_FromSecondsF64((f64) target_input_frames / (f64) stream_state->info.actual_sample_rate);
     stream_state->info.output_latency = PlatformAudio_ReferenceTimeToNanoseconds(output_stream_latency);
     stream_state->input_sample_index = 0;
     stream_state->output_sample_index = 0;
@@ -1987,7 +2082,35 @@ static DWORD WINAPI PlatformAudio_DuplexThreadProc (LPVOID parameter)
     }
 
     {
+        Nanoseconds prefill_start_time;
+
+        prefill_start_time = Platform_QueryTimestamp();
+        while (PlatformAudioFrameRing_GetCount(&input_ring) < target_input_frames)
+        {
+            if (Platform_QueryTimestamp() - prefill_start_time > Nanoseconds_FromMilliseconds(250))
+            {
+                break;
+            }
+
+            result = PlatformAudio_DrainCaptureClientToRing(
+                capture_client,
+                active_input_format,
+                stream_state->info.input_channel_count,
+                capture_packet_channels,
+                &input_ring,
+                &ring_overflow_occurred);
+            if (FAILED(result))
+            {
+                goto startup_failed;
+            }
+
+            Sleep(1);
+        }
+    }
+
+    {
         BYTE *render_buffer;
+        b32 initial_underflow;
 
         result = render_client->lpVtbl->GetBuffer(render_client, output_buffer_frame_count, &render_buffer);
         if (FAILED(result))
@@ -1995,7 +2118,18 @@ static DWORD WINAPI PlatformAudio_DuplexThreadProc (LPVOID parameter)
             goto startup_failed;
         }
 
-        PlatformAudioFrameRing_Pop(&input_ring, duplex_input_channels, output_buffer_frame_count);
+        if (PlatformAudioFrameRing_GetCount(&input_ring) > max_input_frames)
+        {
+            u32 discarded_frames;
+
+            discarded_frames = PlatformAudioFrameRing_DiscardOldest(
+                &input_ring,
+                PlatformAudioFrameRing_GetCount(&input_ring) - target_input_frames);
+            stream_state->input_sample_index += discarded_frames;
+            ring_overflow_occurred = true;
+        }
+
+        initial_underflow = PlatformAudioFrameRing_Pop(&input_ring, duplex_input_channels, output_buffer_frame_count);
         PlatformAudio_RunDuplexCallback(
             stream_state,
             duplex_input_channels,
@@ -2004,8 +2138,9 @@ static DWORD WINAPI PlatformAudio_DuplexThreadProc (LPVOID parameter)
             duplex_output_storage,
             duplex_output_channels,
             output_buffer_frame_count,
-            false,
-            true);
+            ring_overflow_occurred,
+            initial_underflow);
+        ring_overflow_occurred = false;
 
         result = render_client->lpVtbl->ReleaseBuffer(render_client, output_buffer_frame_count, 0);
         if (FAILED(result))
@@ -2044,64 +2179,33 @@ static DWORD WINAPI PlatformAudio_DuplexThreadProc (LPVOID parameter)
 
         if (wait_result == WAIT_TIMEOUT)
         {
-            UINT32 packet_length;
             UINT32 padding;
             UINT32 frames_to_render;
             BYTE *render_buffer;
             b32 input_overflow_for_callback;
             b32 input_underflow_for_callback;
 
-            result = capture_client->lpVtbl->GetNextPacketSize(capture_client, &packet_length);
+            result = PlatformAudio_DrainCaptureClientToRing(
+                capture_client,
+                active_input_format,
+                stream_state->info.input_channel_count,
+                capture_packet_channels,
+                &input_ring,
+                &ring_overflow_occurred);
             if (FAILED(result))
             {
                 break;
             }
 
-            while (packet_length > 0)
+            if (PlatformAudioFrameRing_GetCount(&input_ring) > max_input_frames)
             {
-                BYTE *capture_buffer;
-                UINT32 frames_available;
-                DWORD flags;
-                b32 packet_overflow;
+                u32 discarded_frames;
 
-                result = capture_client->lpVtbl->GetBuffer(
-                    capture_client,
-                    &capture_buffer,
-                    &frames_available,
-                    &flags,
-                    NULL,
-                    NULL);
-                if (FAILED(result))
-                {
-                    break;
-                }
-
-                PlatformAudio_ConvertFormatToPlanarF32(
-                    capture_packet_channels,
-                    capture_buffer,
-                    active_input_format,
-                    stream_state->info.input_channel_count,
-                    frames_available,
-                    (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0);
-                packet_overflow = PlatformAudioFrameRing_Push(&input_ring, capture_packet_channels, frames_available);
-                ring_overflow_occurred = ring_overflow_occurred || packet_overflow || ((flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) != 0);
-
-                result = capture_client->lpVtbl->ReleaseBuffer(capture_client, frames_available);
-                if (FAILED(result))
-                {
-                    break;
-                }
-
-                result = capture_client->lpVtbl->GetNextPacketSize(capture_client, &packet_length);
-                if (FAILED(result))
-                {
-                    break;
-                }
-            }
-
-            if (FAILED(result))
-            {
-                break;
+                discarded_frames = PlatformAudioFrameRing_DiscardOldest(
+                    &input_ring,
+                    PlatformAudioFrameRing_GetCount(&input_ring) - target_input_frames);
+                stream_state->input_sample_index += discarded_frames;
+                ring_overflow_occurred = true;
             }
 
             result = output_audio_client->lpVtbl->GetCurrentPadding(output_audio_client, &padding);
