@@ -43,6 +43,11 @@ typedef struct PlatformState
     usize dropped_path_count;
     c8 dropped_path_bytes[PLATFORM_MAX_DROPPED_PATH_BYTES];
     usize dropped_path_byte_count;
+    PlatformModalTickFunction *modal_tick_callback;
+    void *modal_tick_user_data;
+    b32 is_in_modal_loop;
+    b32 is_in_modal_tick;
+    PlatformEvent modal_tick_events[PLATFORM_MAX_PENDING_EVENTS];
 } PlatformState;
 
 extern PlatformState platform_state;

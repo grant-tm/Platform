@@ -3,6 +3,9 @@
 #include <malloc.h>
 #include <shellapi.h>
 
+#define PLATFORM_MODAL_TICK_TIMER_ID 1u
+#define PLATFORM_MODAL_TICK_INTERVAL_MS 16u
+
 PlatformState platform_state = {0};
 
 static b32 Platform_RegisterWindowClass (void)
@@ -10,7 +13,7 @@ static b32 Platform_RegisterWindowClass (void)
     WNDCLASSEXW window_class = {0};
 
     window_class.cbSize = sizeof(window_class);
-    window_class.style = CS_HREDRAW | CS_VREDRAW;
+    window_class.style = 0;
     window_class.lpfnWndProc = Platform_WindowProc;
     window_class.hInstance = platform_state.instance;
     window_class.hCursor = LoadCursorA(NULL, IDC_ARROW);
@@ -115,6 +118,13 @@ Platform_ResetDroppedFileStorage (void)
     platform_state.dropped_path_byte_count = 0;
 }
 
+static void
+Platform_BeginFrameInputCollection (void)
+{
+    Platform_ResetTransientInputState();
+    Platform_ResetDroppedFileStorage();
+}
+
 static String *
 Platform_AllocateDroppedPathArray (usize path_count)
 {
@@ -145,36 +155,13 @@ Platform_AllocateDroppedPathBytes (usize byte_count)
     return result;
 }
 
-void Platform_PumpEvents (PlatformEventBuffer *event_buffer)
+static void
+Platform_CopyPendingEventsToBuffer (PlatformEventBuffer *event_buffer)
 {
-    MSG message;
     usize event_count_to_copy;
     usize remaining_event_count;
 
-    ASSERT(platform_state.is_initialized);
     ASSERT(event_buffer != NULL);
-
-    PlatformEventBuffer_Reset(event_buffer);
-    Platform_ResetTransientInputState();
-    Platform_ResetDroppedFileStorage();
-
-    while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE))
-    {
-        if (message.message == WM_QUIT)
-        {
-            PlatformEvent event = {0};
-
-            event.type = PLATFORM_EVENT_QUIT;
-            event.timestamp = Platform_QueryTimestamp();
-            Platform_PushEvent(&event);
-            continue;
-        }
-
-        TranslateMessage(&message);
-        DispatchMessageW(&message);
-    }
-
-    Platform_UpdateModifierState();
 
     event_count_to_copy = MIN(platform_state.pending_event_count, event_buffer->capacity);
     if (event_count_to_copy > 0)
@@ -195,6 +182,63 @@ void Platform_PumpEvents (PlatformEventBuffer *event_buffer)
     }
 
     platform_state.pending_event_count = remaining_event_count;
+}
+
+static void
+Platform_RunModalTick (void)
+{
+    PlatformEventBuffer event_buffer;
+
+    if ((platform_state.modal_tick_callback == NULL) || platform_state.is_in_modal_tick)
+    {
+        return;
+    }
+
+    Platform_BeginFrameInputCollection();
+    Platform_UpdateModifierState();
+
+    event_buffer = PlatformEventBuffer_Create(platform_state.modal_tick_events, ARRAY_COUNT(platform_state.modal_tick_events));
+    Platform_CopyPendingEventsToBuffer(&event_buffer);
+
+    platform_state.is_in_modal_tick = true;
+    platform_state.modal_tick_callback(&event_buffer, platform_state.modal_tick_user_data);
+    platform_state.is_in_modal_tick = false;
+}
+
+void Platform_PumpEvents (PlatformEventBuffer *event_buffer)
+{
+    MSG message;
+
+    ASSERT(platform_state.is_initialized);
+    ASSERT(event_buffer != NULL);
+
+    PlatformEventBuffer_Reset(event_buffer);
+    Platform_BeginFrameInputCollection();
+
+    while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE))
+    {
+        if (message.message == WM_QUIT)
+        {
+            PlatformEvent event = {0};
+
+            event.type = PLATFORM_EVENT_QUIT;
+            event.timestamp = Platform_QueryTimestamp();
+            Platform_PushEvent(&event);
+            continue;
+        }
+
+        TranslateMessage(&message);
+        DispatchMessageW(&message);
+    }
+
+    Platform_UpdateModifierState();
+    Platform_CopyPendingEventsToBuffer(event_buffer);
+}
+
+void Platform_SetModalTickCallback (PlatformModalTickFunction *callback, void *user_data)
+{
+    platform_state.modal_tick_callback = callback;
+    platform_state.modal_tick_user_data = user_data;
 }
 
 PlatformWindow Platform_CreateWindowHandle (u32 index, u32 generation)
@@ -374,6 +418,47 @@ LRESULT CALLBACK Platform_WindowProc (HWND hwnd, UINT message, WPARAM w_param, L
             return 0;
         }
 
+        case WM_ERASEBKGND:
+        {
+            return 1;
+        }
+
+        case WM_PAINT:
+        {
+            PAINTSTRUCT paint;
+
+            BeginPaint(hwnd, &paint);
+            EndPaint(hwnd, &paint);
+            Platform_RunModalTick();
+            return 0;
+        }
+
+        case WM_ENTERSIZEMOVE:
+        {
+            platform_state.is_in_modal_loop = true;
+            SetTimer(hwnd, PLATFORM_MODAL_TICK_TIMER_ID, PLATFORM_MODAL_TICK_INTERVAL_MS, NULL);
+            return 0;
+        }
+
+        case WM_EXITSIZEMOVE:
+        {
+            platform_state.is_in_modal_loop = false;
+            KillTimer(hwnd, PLATFORM_MODAL_TICK_TIMER_ID);
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
+
+        case WM_TIMER:
+        {
+            if ((w_param == PLATFORM_MODAL_TICK_TIMER_ID) && platform_state.is_in_modal_loop)
+            {
+                RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOERASE);
+                return 0;
+            }
+
+            break;
+        }
+
         case WM_SETCURSOR:
         {
             if (LOWORD(l_param) == HTCLIENT)
@@ -420,6 +505,12 @@ LRESULT CALLBACK Platform_WindowProc (HWND hwnd, UINT message, WPARAM w_param, L
             event.data.window_resized.width = (i32) LOWORD(l_param);
             event.data.window_resized.height = (i32) HIWORD(l_param);
             Platform_PushEvent(&event);
+
+            if (platform_state.is_in_modal_loop)
+            {
+                RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOERASE);
+            }
+
             return 0;
         }
 
