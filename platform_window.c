@@ -1,5 +1,7 @@
 #include "platform_internal.h"
 
+#include <shellapi.h>
+
 static DWORD Platform_GetWindowStyle (PlatformWindowFlags flags)
 {
     DWORD style;
@@ -109,7 +111,14 @@ PlatformWindow PlatformWindow_Create (const PlatformWindowDesc *desc)
         return HANDLE64_INVALID;
     }
 
+    window_state->flags = desc->flags;
+
     PlatformWindow_SetTitle(Platform_CreateWindowHandle(window_state->handle.index, window_state->handle.generation), desc->title);
+
+    if (Bits_HasAnyU32(desc->flags, PLATFORM_WINDOW_FLAG_ACCEPTS_DROP))
+    {
+        DragAcceptFiles(hwnd, TRUE);
+    }
 
     if (Bits_HasAnyU32(desc->flags, PLATFORM_WINDOW_FLAG_VISIBLE))
     {

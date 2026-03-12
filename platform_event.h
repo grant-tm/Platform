@@ -22,6 +22,7 @@ typedef enum PlatformEventType
     PLATFORM_EVENT_MOUSE_BUTTON_DOWN,
     PLATFORM_EVENT_MOUSE_BUTTON_UP,
     PLATFORM_EVENT_MOUSE_WHEEL,
+    PLATFORM_EVENT_FILES_DROPPED,
 } PlatformEventType;
 
 typedef enum PlatformKey
@@ -145,6 +146,14 @@ typedef struct PlatformEventWindowDPIChanged
     f32 scale;
 } PlatformEventWindowDPIChanged;
 
+typedef struct PlatformEventFilesDropped
+{
+    i32 x;
+    i32 y;
+    String *paths;
+    usize path_count;
+} PlatformEventFilesDropped;
+
 typedef struct PlatformEvent
 {
     PlatformEventType type;
@@ -161,6 +170,7 @@ typedef struct PlatformEvent
         PlatformEventMouseMove mouse_move;
         PlatformEventMouseButtonData mouse_button;
         PlatformEventMouseWheel mouse_wheel;
+        PlatformEventFilesDropped files_dropped;
     } data;
 } PlatformEvent;
 

@@ -1,5 +1,8 @@
 #include "platform_internal.h"
 
+#include <malloc.h>
+#include <shellapi.h>
+
 PlatformState platform_state = {0};
 
 static b32 Platform_RegisterWindowClass (void)
@@ -105,6 +108,43 @@ void Platform_PushEvent (const PlatformEvent *event)
     platform_state.pending_event_count += 1;
 }
 
+static void
+Platform_ResetDroppedFileStorage (void)
+{
+    platform_state.dropped_path_count = 0;
+    platform_state.dropped_path_byte_count = 0;
+}
+
+static String *
+Platform_AllocateDroppedPathArray (usize path_count)
+{
+    String *result;
+
+    if ((platform_state.dropped_path_count + path_count) > ARRAY_COUNT(platform_state.dropped_paths))
+    {
+        return NULL;
+    }
+
+    result = platform_state.dropped_paths + platform_state.dropped_path_count;
+    platform_state.dropped_path_count += path_count;
+    return result;
+}
+
+static c8 *
+Platform_AllocateDroppedPathBytes (usize byte_count)
+{
+    c8 *result;
+
+    if ((platform_state.dropped_path_byte_count + byte_count) > ARRAY_COUNT(platform_state.dropped_path_bytes))
+    {
+        return NULL;
+    }
+
+    result = platform_state.dropped_path_bytes + platform_state.dropped_path_byte_count;
+    platform_state.dropped_path_byte_count += byte_count;
+    return result;
+}
+
 void Platform_PumpEvents (PlatformEventBuffer *event_buffer)
 {
     MSG message;
@@ -116,6 +156,7 @@ void Platform_PumpEvents (PlatformEventBuffer *event_buffer)
 
     PlatformEventBuffer_Reset(event_buffer);
     Platform_ResetTransientInputState();
+    Platform_ResetDroppedFileStorage();
 
     while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE))
     {
@@ -423,6 +464,68 @@ LRESULT CALLBACK Platform_WindowProc (HWND hwnd, UINT message, WPARAM w_param, L
             event.timestamp = Platform_QueryTimestamp();
             event.data.window_moved.x = (i32) (short) LOWORD(l_param);
             event.data.window_moved.y = (i32) (short) HIWORD(l_param);
+            Platform_PushEvent(&event);
+            return 0;
+        }
+
+        case WM_DROPFILES:
+        {
+            HDROP drop_handle;
+            UINT file_count;
+            POINT drop_point;
+            String *paths;
+            PlatformEvent event;
+            UINT file_index;
+
+            drop_handle = (HDROP) w_param;
+            file_count = DragQueryFileW(drop_handle, 0xFFFFFFFFu, NULL, 0);
+            paths = Platform_AllocateDroppedPathArray((usize) file_count);
+            if ((file_count == 0) || (paths == NULL))
+            {
+                DragFinish(drop_handle);
+                return 0;
+            }
+
+            for (file_index = 0; file_index < file_count; file_index += 1)
+            {
+                UINT wide_count;
+                wchar_t *wide_path;
+                i32 utf8_count;
+                c8 *utf8_path;
+
+                wide_count = DragQueryFileW(drop_handle, file_index, NULL, 0);
+                wide_path = (wchar_t *) _alloca(sizeof(wchar_t) * ((usize) wide_count + 1));
+                DragQueryFileW(drop_handle, file_index, wide_path, wide_count + 1);
+
+                utf8_count = WideCharToMultiByte(CP_UTF8, 0, wide_path, -1, NULL, 0, NULL, NULL);
+                if (utf8_count <= 0)
+                {
+                    DragFinish(drop_handle);
+                    return 0;
+                }
+
+                utf8_path = Platform_AllocateDroppedPathBytes((usize) utf8_count);
+                if (utf8_path == NULL)
+                {
+                    DragFinish(drop_handle);
+                    return 0;
+                }
+
+                WideCharToMultiByte(CP_UTF8, 0, wide_path, -1, (char *) utf8_path, utf8_count, NULL, NULL);
+                paths[file_index] = String_Create(utf8_path, (usize) (utf8_count - 1));
+            }
+
+            DragQueryPoint(drop_handle, &drop_point);
+            DragFinish(drop_handle);
+
+            Memory_Zero(&event, sizeof(event));
+            event.type = PLATFORM_EVENT_FILES_DROPPED;
+            event.window = window;
+            event.timestamp = Platform_QueryTimestamp();
+            event.data.files_dropped.x = drop_point.x;
+            event.data.files_dropped.y = drop_point.y;
+            event.data.files_dropped.paths = paths;
+            event.data.files_dropped.path_count = (usize) file_count;
             Platform_PushEvent(&event);
             return 0;
         }

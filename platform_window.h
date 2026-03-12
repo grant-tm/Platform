@@ -8,6 +8,7 @@ typedef enum PlatformWindowFlags
     PLATFORM_WINDOW_FLAG_NONE = 0,
     PLATFORM_WINDOW_FLAG_VISIBLE = BIT_U32(0),
     PLATFORM_WINDOW_FLAG_RESIZABLE = BIT_U32(1),
+    PLATFORM_WINDOW_FLAG_ACCEPTS_DROP = BIT_U32(2),
 } PlatformWindowFlags;
 
 typedef struct PlatformWindowDesc

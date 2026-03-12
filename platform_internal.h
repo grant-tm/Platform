@@ -9,6 +9,8 @@
 
 #define PLATFORM_MAX_WINDOWS 64
 #define PLATFORM_MAX_PENDING_EVENTS 1024
+#define PLATFORM_MAX_DROPPED_FILES 64
+#define PLATFORM_MAX_DROPPED_PATH_BYTES 16384
 #define PLATFORM_WINDOW_CLASS_NAME L"MorganAudioPlatformWindowClass"
 
 void PlatformAudio_Initialize (void);
@@ -20,6 +22,7 @@ typedef struct PlatformWindowState
     b32 is_used;
     HWND hwnd;
     GenerationalHandle64 handle;
+    PlatformWindowFlags flags;
 } PlatformWindowState;
 
 typedef struct PlatformState
@@ -36,6 +39,10 @@ typedef struct PlatformState
     PlatformWindowState windows[PLATFORM_MAX_WINDOWS];
     PlatformEvent pending_events[PLATFORM_MAX_PENDING_EVENTS];
     usize pending_event_count;
+    String dropped_paths[PLATFORM_MAX_DROPPED_FILES];
+    usize dropped_path_count;
+    c8 dropped_path_bytes[PLATFORM_MAX_DROPPED_PATH_BYTES];
+    usize dropped_path_byte_count;
 } PlatformState;
 
 extern PlatformState platform_state;
