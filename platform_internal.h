@@ -27,6 +27,10 @@ typedef struct PlatformState
     HINSTANCE instance;
     LARGE_INTEGER performance_frequency;
     ATOM window_class;
+    HCURSOR current_cursor;
+    PlatformCursorShape cursor_shape;
+    b32 cursor_is_visible;
+    b32 cursor_is_confined;
     PlatformInputState input_state;
     PlatformWindowState windows[PLATFORM_MAX_WINDOWS];
     PlatformEvent pending_events[PLATFORM_MAX_PENDING_EVENTS];

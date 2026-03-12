@@ -10,7 +10,7 @@ static b32 Platform_RegisterWindowClass (void)
     window_class.style = CS_HREDRAW | CS_VREDRAW;
     window_class.lpfnWndProc = Platform_WindowProc;
     window_class.hInstance = platform_state.instance;
-    window_class.hCursor = LoadCursorW(NULL, (LPCWSTR) IDC_ARROW);
+    window_class.hCursor = LoadCursorA(NULL, IDC_ARROW);
     window_class.lpszClassName = PLATFORM_WINDOW_CLASS_NAME;
 
     platform_state.window_class = RegisterClassExW(&window_class);
@@ -50,6 +50,10 @@ b32 Platform_Initialize (void)
     {
         return false;
     }
+
+    platform_state.cursor_shape = PLATFORM_CURSOR_SHAPE_ARROW;
+    platform_state.current_cursor = LoadCursorA(NULL, IDC_ARROW);
+    platform_state.cursor_is_visible = true;
 
     PlatformAudio_Initialize();
     platform_state.is_initialized = true;
@@ -326,6 +330,25 @@ LRESULT CALLBACK Platform_WindowProc (HWND hwnd, UINT message, WPARAM w_param, L
         {
             Platform_PushWindowEvent(window, PLATFORM_EVENT_WINDOW_CLOSE_REQUESTED);
             return 0;
+        }
+
+        case WM_SETCURSOR:
+        {
+            if (LOWORD(l_param) == HTCLIENT)
+            {
+                if (platform_state.cursor_is_visible)
+                {
+                    SetCursor(platform_state.current_cursor);
+                }
+                else
+                {
+                    SetCursor(NULL);
+                }
+
+                return TRUE;
+            }
+
+            break;
         }
 
         case WM_SETFOCUS:
