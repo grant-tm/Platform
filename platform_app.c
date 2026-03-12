@@ -716,13 +716,19 @@ LRESULT CALLBACK Platform_WindowProc (HWND hwnd, UINT message, WPARAM w_param, L
         case WM_MOUSEWHEEL:
         {
             PlatformEvent event = {0};
+            POINT screen_point;
+            POINT client_point;
 
             event.type = PLATFORM_EVENT_MOUSE_WHEEL;
             event.window = window;
             event.timestamp = Platform_QueryTimestamp();
             event.data.mouse_wheel.delta = (i32) GET_WHEEL_DELTA_WPARAM(w_param);
-            event.data.mouse_wheel.x = GET_X_LPARAM(l_param);
-            event.data.mouse_wheel.y = GET_Y_LPARAM(l_param);
+            screen_point.x = GET_X_LPARAM(l_param);
+            screen_point.y = GET_Y_LPARAM(l_param);
+            client_point = screen_point;
+            ScreenToClient(hwnd, &client_point);
+            event.data.mouse_wheel.x = client_point.x;
+            event.data.mouse_wheel.y = client_point.y;
             platform_state.input_state.mouse_position = IVec2_Create(event.data.mouse_wheel.x, event.data.mouse_wheel.y);
             platform_state.input_state.mouse_wheel_delta += event.data.mouse_wheel.delta;
             Platform_PushEvent(&event);
